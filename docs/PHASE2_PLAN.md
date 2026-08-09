@@ -7,15 +7,16 @@
 | 2.3 Multi-Agent Orchestration | ✅ |
 | 2.4 Automated Visualizations | ✅ |
 | 2.5 Forecasting & Advanced Analytics | ✅ |
-| 2.6 Full Chat + Evidence + Export | Planned |
+| 2.6 Full Chat + Evidence + Export | ✅ |
 
-## 2.5 Forecasting
+## 2.6 Full Chat + Evidence + Export
 
-- `app/core/analytics.py` – forecast, trend, anomalies, correlation
-- `app/agents/forecast_agent.py`
-- Intent: `forecast`
-- Prophet optional; baseline always works
-- Edge cases: no time column, <5 points, constant series, missing Prophet
+- Session chat history with `st.chat_message`
+- Evidence packs: question, route, SQL, steps, model, shape
+- Downloads: result CSV, forecast CSV, evidence JSON/MD, chart HTML (+ PNG if kaleido)
+- Dataset switch clears chat; history capped at 30 turns
+- `app/core/export.py`
 
-## Next: 2.6
-Conversational history, evidence packs, CSV/PNG/PDF export.
+## Phase 2 complete
+
+Next product phases (outside Phase 2 plan): multi-dataset joins, auth, deployment hardening.

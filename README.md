@@ -2,7 +2,7 @@
 
 **AI-Powered Business Intelligence Assistant**
 
-Upload company data → Ask in plain English → Get SQL, charts, forecasts and insights.
+Upload company data → Ask in plain English → Get SQL, charts, forecasts, evidence packs and exports.
 
 ## Current Status
 
@@ -14,27 +14,26 @@ Upload company data → Ask in plain English → Get SQL, charts, forecasts and 
 | Phase 2.3 Multi-agent | ✅ Complete |
 | Phase 2.4 Visualizations | ✅ Complete |
 | Phase 2.5 Forecasting & Analytics | ✅ Complete |
-| Phase 2.6 Full Chat + Export | Planned |
+| Phase 2.6 Full Chat · Evidence · Export | ✅ Complete |
 
-## Phase 2.5 Highlights
+## Phase 2.6 Highlights
 
-- Time-series forecast (Prophet optional, baseline always available)
-- Trend direction + relative change summary
-- Anomaly flags (z-score vs trend)
-- Horizon parsing (“next 30 days”, “next month”)
-- Clear skip when no time column / too few points
+- Conversational chat history (session-scoped, per dataset)
+- Full evidence pack per answer (JSON + Markdown download)
+- Export result CSV, forecast CSV, chart HTML (PNG optional via kaleido)
+- Clear chat · history capped at 30 turns for memory safety
 
 ## How to Run
 
 ```bash
 pip install -r requirements.txt
-# optional: pip install prophet
+# optional: pip install prophet kaleido
 cp .env.example .env
 streamlit run app/frontend/app.py
 ```
 
 ## Project Structure
 
-- `app/core/` – ingestion, cleaning, DuckDB, NL→SQL, visualization, **analytics**
-- `app/agents/` – router, SQL, insight, clarify, viz, **forecast**, orchestrator
+- `app/core/` – ingestion, cleaning, DuckDB, NL→SQL, visualization, analytics, **export**
+- `app/agents/` – router, SQL, insight, clarify, viz, forecast, orchestrator
 - `app/frontend/` – Streamlit UI
