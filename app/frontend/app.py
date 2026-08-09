@@ -72,7 +72,7 @@ st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide")
 
 st.title("InsightForgeAI")
 st.markdown("### AI-Powered Business Intelligence Assistant")
-st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.6: Full Chat · Evidence · Export")
+st.caption("Phase 3 – Semantic Layer & Governed Metrics | 3.5 Metric Governance UI")
 st.markdown("---")
 
 if "workspace" not in st.session_state:
@@ -373,7 +373,9 @@ if selected_table:
             st.rerun()
 
     st.markdown("---")
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Schema", "Cleaning & Lineage", "Data Profile", "Data Preview", "SQL Query"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Schema", "Cleaning & Lineage", "Data Profile", "Data Preview", "SQL Query", "Metrics Governance"]
+    )
 
     with tab1:
         st.markdown("#### Semantic Schema Detection")
@@ -431,5 +433,185 @@ if selected_table:
             else:
                 st.success(f"Returned {len(result_df):,} rows × {len(result_df.columns)} columns")
                 st.dataframe(result_df, width="stretch", hide_index=True)
+
+    with tab6:
+        st.markdown("#### Metric Governance (Phase 3.5)")
+        st.caption(
+            "Browse auto-discovered metrics, override definitions, disable unwanted ones, "
+            "or add custom metrics. Changes persist under data/metric_catalog/ and are used "
+            "by NL→SQL, the metric compiler, and time intelligence."
+        )
+
+        # Lazy-load governance + semantic layer
+        try:
+            import importlib.util as _ilu
+            _gov_path = project_root / "app" / "core" / "metric_governance.py"
+            _sl_path = project_root / "app" / "core" / "semantic_layer.py"
+            if not _gov_path.exists() or not _sl_path.exists():
+                st.warning("metric_governance.py or semantic_layer.py not found. Copy Phase 3.5 files into app/core/.")
+            else:
+                _gov_spec = _ilu.spec_from_file_location("metric_governance_ui", _gov_path)
+                gov = _ilu.module_from_spec(_gov_spec)
+                sys.modules["metric_governance_ui"] = gov
+                _gov_spec.loader.exec_module(gov)
+
+                _sl_spec = _ilu.spec_from_file_location("semantic_layer_ui", _sl_path)
+                sl = _ilu.module_from_spec(_sl_spec)
+                sys.modules["semantic_layer_ui"] = sl
+                _sl_spec.loader.exec_module(sl)
+
+                model = gov.build_governed_semantic_model(st.session_state.workspace, selected_table)
+                cat_info = gov.catalog_summary(selected_table)
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Metrics", len(model.metrics))
+                c2.metric("Source", model.source)
+                c3.metric("Overrides", cat_info["override_count"])
+                c4.metric("Disabled", cat_info["disabled_count"])
+                if cat_info["path"]:
+                    st.caption(f"Catalog file: `{cat_info['path']}`")
+
+                # Metrics table
+                rows = []
+                for m in model.metrics:
+                    rows.append({
+                        "Name": m.name,
+                        "Label": m.label,
+                        "Agg": m.agg.value if hasattr(m.agg, "value") else str(m.agg),
+                        "Additivity": m.additivity.value if hasattr(m.additivity, "value") else str(m.additivity),
+                        "Preferred": m.preferred,
+                        "SQL": m.sql_expression(),
+                        "Reason": (m.reason or "")[:80],
+                    })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+                else:
+                    st.info("No metrics in the governed model.")
+
+                st.markdown("---")
+                st.markdown("##### Edit / Disable existing metric")
+                metric_names = [m.name for m in model.metrics]
+                if metric_names:
+                    sel = st.selectbox("Select metric", options=metric_names, key="gov_sel_metric")
+                    chosen = next((m for m in model.metrics if m.name == sel), None)
+                    if chosen:
+                        with st.form(key="gov_edit_form"):
+                            new_label = st.text_input("Label", value=chosen.label)
+                            new_desc = st.text_area("Description", value=chosen.description or "", height=60)
+                            new_preferred = st.checkbox("Preferred", value=chosen.preferred)
+                            new_expr = st.text_input(
+                                "Expression override (optional, DuckDB SQL fragment)",
+                                value=chosen.expr or "",
+                                help="If set, this exact expression is used instead of the agg template.",
+                            )
+                            col_a, col_b, col_c = st.columns(3)
+                            save_btn = col_a.form_submit_button("Save override", type="primary")
+                            disable_btn = col_b.form_submit_button("Disable metric")
+                            if save_btn:
+                                updated = sl.Metric(
+                                    name=chosen.name,
+                                    label=new_label.strip() or chosen.label,
+                                    description=new_desc.strip(),
+                                    agg=chosen.agg,
+                                    additivity=chosen.additivity,
+                                    measure_column=chosen.measure_column,
+                                    entity_column=chosen.entity_column,
+                                    numerator=chosen.numerator,
+                                    denominator=chosen.denominator,
+                                    expr=new_expr.strip() or chosen.expr,
+                                    filters=list(chosen.filters or []),
+                                    preferred=bool(new_preferred),
+                                    confidence=chosen.confidence,
+                                    tags=list(chosen.tags or []),
+                                    reason="User override via Metrics Governance UI",
+                                )
+                                gov.set_metric_override(selected_table, updated)
+                                st.success(f"Saved override for `{chosen.name}`")
+                                st.rerun()
+                            if disable_btn:
+                                gov.disable_metric(selected_table, chosen.name)
+                                st.success(f"Disabled `{chosen.name}`")
+                                st.rerun()
+
+                st.markdown("---")
+                st.markdown("##### Add custom metric")
+                with st.form(key="gov_add_form"):
+                    cname = st.text_input("Name (snake_case)", placeholder="e.g. net_revenue")
+                    clabel = st.text_input("Label", placeholder="e.g. Net Revenue")
+                    cagg = st.selectbox(
+                        "Aggregation",
+                        options=["sum", "count", "count_distinct", "avg", "min", "max", "ratio", "expression"],
+                    )
+                    cmeasure = st.text_input("Measure column (for sum/avg/…)", placeholder="amount")
+                    centity = st.text_input("Entity column (for count_distinct / ratio denom)", placeholder="order_id")
+                    cexpr = st.text_input("Custom expression (for expression / ratio override)", placeholder='SUM("amount") / NULLIF(COUNT(*), 0)')
+                    cpreferred = st.checkbox("Preferred", value=True)
+                    add_btn = st.form_submit_button("Add custom metric", type="primary")
+                    if add_btn and cname.strip():
+                        try:
+                            agg_enum = sl.AggType(cagg)
+                        except Exception:
+                            agg_enum = sl.AggType.EXPRESSION
+                        additivity = sl.Additivity.NON if agg_enum in (sl.AggType.RATIO, sl.AggType.EXPRESSION) else (
+                            sl.Additivity.SEMI if agg_enum in (sl.AggType.AVG, sl.AggType.MIN, sl.AggType.MAX) else sl.Additivity.FULL
+                        )
+                        new_m = sl.Metric(
+                            name=cname.strip().lower().replace(" ", "_"),
+                            label=clabel.strip() or cname.strip(),
+                            description="User-defined metric",
+                            agg=agg_enum,
+                            additivity=additivity,
+                            measure_column=cmeasure.strip() or None,
+                            entity_column=centity.strip() or None,
+                            expr=cexpr.strip() or None,
+                            preferred=bool(cpreferred),
+                            confidence=0.9,
+                            tags=["user"],
+                            reason="Added via Metrics Governance UI",
+                        )
+                        gov.set_metric_override(selected_table, new_m)
+                        st.success(f"Added custom metric `{new_m.name}`")
+                        st.rerun()
+
+                st.markdown("---")
+                col_r1, col_r2 = st.columns(2)
+                if col_r1.button("Reset catalog (back to pure auto)", key="gov_reset"):
+                    gov.reset_catalog(selected_table)
+                    st.success("Catalog cleared. Model will rebuild from auto-discovery.")
+                    st.rerun()
+                if model.warnings:
+                    with col_r2:
+                        for w in model.warnings:
+                            st.warning(w)
+
+                # Entities / Dimensions quick view
+                with st.expander("Entities & Dimensions (read-only)", expanded=False):
+                    if model.entities:
+                        st.markdown("**Entities**")
+                        st.dataframe(
+                            pd.DataFrame([{"name": e.name, "column": e.column, "role": e.role, "confidence": e.confidence} for e in model.entities]),
+                            width="stretch",
+                            hide_index=True,
+                        )
+                    if model.dimensions:
+                        st.markdown("**Dimensions**")
+                        st.dataframe(
+                            pd.DataFrame([
+                                {
+                                    "name": d.name,
+                                    "column": d.column,
+                                    "type": d.dim_type.value if hasattr(d.dim_type, "value") else str(d.dim_type),
+                                    "cardinality": d.cardinality,
+                                }
+                                for d in model.dimensions
+                            ]),
+                            width="stretch",
+                            hide_index=True,
+                        )
+                    if model.time_dimension:
+                        st.caption(f"Time dimension: `{model.time_dimension}`")
+        except Exception as e:
+            st.error(f"Could not load metric governance UI: {e}")
+            st.exception(e)
 else:
     st.info("Upload files from the sidebar to get started.")

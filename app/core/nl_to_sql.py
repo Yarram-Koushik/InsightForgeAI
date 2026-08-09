@@ -37,6 +37,38 @@ get_llm_client = llm_mod.get_llm_client
 LLMResponse = llm_mod.LLMResponse
 
 
+def _get_semantic_model(workspace, table_name: str):
+    """
+    Prefer the governed model (Phase 3.5 catalog overrides).
+    Falls back to pure auto model if governance is unavailable.
+    Returns (model, semantic_layer_module).
+    """
+    import importlib.util as _ilu
+    _sl_path = _CORE_DIR / "semantic_layer.py"
+    if not _sl_path.exists():
+        raise FileNotFoundError("semantic_layer.py missing")
+    _sl_spec = _ilu.spec_from_file_location("_semantic_layer_shared", _sl_path)
+    _sl = _ilu.module_from_spec(_sl_spec)
+    sys.modules["_semantic_layer_shared"] = _sl
+    _sl_spec.loader.exec_module(_sl)
+
+    # Phase 3.5 – try governance first
+    _gov_path = _CORE_DIR / "metric_governance.py"
+    if _gov_path.exists():
+        try:
+            _gov_spec = _ilu.spec_from_file_location("_metric_gov_shared", _gov_path)
+            _gov = _ilu.module_from_spec(_gov_spec)
+            sys.modules["_metric_gov_shared"] = _gov
+            _gov_spec.loader.exec_module(_gov)
+            model = _gov.build_governed_semantic_model(workspace, table_name)
+            return model, _sl
+        except Exception:
+            pass
+
+    model = _sl.build_semantic_model(workspace, table_name)
+    return model, _sl
+
+
 @dataclass
 class NL2SQLResult:
     success: bool
@@ -112,19 +144,13 @@ def build_schema_context(
         lines.append(f"SAMPLE ROWS (first {len(sample)}):")
         lines.append(sample.to_string(index=False, max_cols=12))
 
-    # ---- Phase 3.1 Semantic Metric Layer ----
+    # ---- Phase 3.1 / 3.5 Semantic Metric Layer (governed) ----
     try:
-        import importlib.util as _ilu
-        _sl_path = _CORE_DIR / "semantic_layer.py"
-        if _sl_path.exists():
-            _sl_spec = _ilu.spec_from_file_location("_semantic_layer_nl", _sl_path)
-            _sl = _ilu.module_from_spec(_sl_spec)
-            import sys as _sys
-            _sys.modules["_semantic_layer_nl"] = _sl
-            _sl_spec.loader.exec_module(_sl)
-            _model = _sl.build_semantic_model(workspace, table_name)
-            lines.append("")
-            lines.append(_sl.model_prompt_summary(_model, max_metrics=10))
+        _model, _sl = _get_semantic_model(workspace, table_name)
+        lines.append("")
+        lines.append(_sl.model_prompt_summary(_model, max_metrics=10))
+        if getattr(_model, "source", "") == "user":
+            lines.append("(metric catalog overrides applied)")
     except Exception as _e:
         lines.append("")
         lines.append(f"SEMANTIC METRICS: (unavailable: {_e})")
@@ -217,30 +243,23 @@ def generate_sql(
         f"QUESTION: {question.strip()}",
     ]
 
-    # Phase 3.1 – question-specific metric resolution
+    # Phase 3.1 / 3.5 – question-specific metric resolution (governed)
     try:
         import importlib.util as _ilu
-        _sl_path = _CORE_DIR / "semantic_layer.py"
-        if _sl_path.exists():
-            _sl_spec = _ilu.spec_from_file_location("_semantic_layer_gen", _sl_path)
-            _sl = _ilu.module_from_spec(_sl_spec)
-            import sys as _sys
-            _sys.modules["_semantic_layer_gen"] = _sl
-            _sl_spec.loader.exec_module(_sl)
-            _model = _sl.build_semantic_model(workspace, table_name)
-            _block = _sl.metric_prompt_block(question, _model)
-            if _block:
-                user_parts.extend(["", _block])
-            # Phase 3.4 time-intelligence hints
-            _ti_path = _CORE_DIR / "time_intelligence.py"
-            if _ti_path.exists():
-                _ti_spec = _ilu.spec_from_file_location("_ti_gen", _ti_path)
-                _ti = _ilu.module_from_spec(_ti_spec)
-                _sys.modules["_ti_gen"] = _ti
-                _ti_spec.loader.exec_module(_ti)
-                _tib = _ti.time_intel_prompt_block(question, _model)
-                if _tib:
-                    user_parts.extend(["", _tib])
+        _model, _sl = _get_semantic_model(workspace, table_name)
+        _block = _sl.metric_prompt_block(question, _model)
+        if _block:
+            user_parts.extend(["", _block])
+        # Phase 3.4 time-intelligence hints
+        _ti_path = _CORE_DIR / "time_intelligence.py"
+        if _ti_path.exists():
+            _ti_spec = _ilu.spec_from_file_location("_ti_gen", _ti_path)
+            _ti = _ilu.module_from_spec(_ti_spec)
+            sys.modules["_ti_gen"] = _ti
+            _ti_spec.loader.exec_module(_ti)
+            _tib = _ti.time_intel_prompt_block(question, _model)
+            if _tib:
+                user_parts.extend(["", _tib])
     except Exception:
         pass
 
@@ -310,24 +329,19 @@ def ask(
 
     # ------------------------------------------------------------------
     # Phase 3.2 – Deterministic metric compiler (preferred when clear)
+    # Uses governed model (Phase 3.5) when catalog exists
     # ------------------------------------------------------------------
     try:
         import importlib.util as _ilu
-        _sl_path = _CORE_DIR / "semantic_layer.py"
         _mc_path = _CORE_DIR / "metric_compiler.py"
-        if _sl_path.exists() and _mc_path.exists():
-            _sl_spec = _ilu.spec_from_file_location("_sl_ask", _sl_path)
-            _sl = _ilu.module_from_spec(_sl_spec)
-            import sys as _sys
-            _sys.modules["_sl_ask"] = _sl
-            _sl_spec.loader.exec_module(_sl)
+        if _mc_path.exists():
+            _model, _sl = _get_semantic_model(workspace, table_name)
 
             _mc_spec = _ilu.spec_from_file_location("_mc_ask", _mc_path)
             _mc = _ilu.module_from_spec(_mc_spec)
-            _sys.modules["_mc_ask"] = _mc
+            sys.modules["_mc_ask"] = _mc
             _mc_spec.loader.exec_module(_mc)
 
-            _model = _sl.build_semantic_model(workspace, table_name)
             _compiled = _mc.try_compile_from_question(question, _model)
             if _compiled.success and _compiled.sql:
                 df, exec_error = workspace.execute_sql(_compiled.sql)
@@ -355,24 +369,19 @@ def ask(
 
     # ------------------------------------------------------------------
     # Phase 3.4 – Time intelligence (PoP / YoY / YTD / rolling)
+    # Uses governed model (Phase 3.5) when catalog exists
     # ------------------------------------------------------------------
     try:
         import importlib.util as _ilu
-        _sl_path = _CORE_DIR / "semantic_layer.py"
         _ti_path = _CORE_DIR / "time_intelligence.py"
-        if _sl_path.exists() and _ti_path.exists():
-            _sl_spec = _ilu.spec_from_file_location("_sl_ti", _sl_path)
-            _sl = _ilu.module_from_spec(_sl_spec)
-            import sys as _sys
-            _sys.modules["_sl_ti"] = _sl
-            _sl_spec.loader.exec_module(_sl)
+        if _ti_path.exists():
+            _model, _sl = _get_semantic_model(workspace, table_name)
 
             _ti_spec = _ilu.spec_from_file_location("_ti_ask", _ti_path)
             _ti = _ilu.module_from_spec(_ti_spec)
-            _sys.modules["_ti_ask"] = _ti
+            sys.modules["_ti_ask"] = _ti
             _ti_spec.loader.exec_module(_ti)
 
-            _model = _sl.build_semantic_model(workspace, table_name)
             _ti_res = _ti.try_compile_time_intel_from_question(question, _model, table_name)
             if _ti_res.success and _ti_res.sql:
                 df, exec_error = workspace.execute_sql(_ti_res.sql)
