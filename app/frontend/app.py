@@ -52,13 +52,14 @@ make_safe_table_name = ingestion.make_safe_table_name
 get_excel_sheets_info = ingestion.get_excel_sheets_info
 read_file = ingestion.read_file
 
-# ---------- Load NL-to-SQL engine (Phase 2.2) ----------
-nl2sql_path = project_root / "app" / "core" / "nl_to_sql.py"
-spec_nl = importlib.util.spec_from_file_location("nl_to_sql", nl2sql_path)
-nl_module = importlib.util.module_from_spec(spec_nl)
-sys.modules["nl_to_sql"] = nl_module          # CRITICAL: required for @dataclass
-spec_nl.loader.exec_module(nl_module)
-ask_nl = nl_module.ask
+# ---------- Load Multi-Agent Orchestrator (Phase 2.3) ----------
+# Orchestrator internally loads nl_to_sql, router, insight, clarify agents.
+orch_path = project_root / "app" / "agents" / "orchestrator.py"
+spec_orch = importlib.util.spec_from_file_location("orchestrator", orch_path)
+orch_module = importlib.util.module_from_spec(spec_orch)
+sys.modules["orchestrator"] = orch_module     # CRITICAL: required for @dataclass
+spec_orch.loader.exec_module(orch_module)
+run_agent = orch_module.run_agent
 # -----------------------------------------------------------
 
 warnings.filterwarnings("ignore", message="Could not infer format")
@@ -70,7 +71,7 @@ st.set_page_config(
 
 st.title("InsightForgeAI")
 st.markdown("### AI-Powered Business Intelligence Assistant")
-st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.2: Natural Language → SQL")
+st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.3: Multi-Agent Orchestration")
 st.markdown("---")
 
 # ====================== HELPER FUNCTIONS (Temporary - will move later) ======================
@@ -304,15 +305,18 @@ if selected_table:
     else:
         df = record.raw_df
 
-    # ====================== NATURAL LANGUAGE QUERY (Phase 2.2) ======================
+    # ====================== MULTI-AGENT ASK (Phase 2.3) ======================
     st.markdown("---")
     st.markdown("### Ask InsightForge")
-    st.caption("Ask questions in plain English. InsightForge will generate SQL, run it safely, and show results.")
+    st.caption(
+        "Multi-agent pipeline: Router → SQL Agent → Insight Agent. "
+        "Every answer shows the route taken and the SQL used."
+    )
 
     with st.container(border=True):
         nl_question = st.text_input(
             "Your question",
-            placeholder="e.g. How many students are in each Branch?  |  Show average YoP by College  |  List students from a specific college",
+            placeholder="e.g. How many students are in each Branch?  |  Why are counts different across colleges?  |  What can you do?",
             key="nl_question",
             label_visibility="collapsed",
         )
@@ -320,34 +324,61 @@ if selected_table:
         with col_ask:
             ask_clicked = st.button("Ask", type="primary", use_container_width=True)
         with col_status:
-            st.caption("Uses Groq (primary) or Gemini. Configure keys in .env")
+            st.caption("Agents: Router · SQL · Insight · Clarify  |  Keys in .env (Groq primary)")
 
         if ask_clicked and nl_question.strip():
-            with st.spinner("Thinking and generating SQL..."):
-                nl_result = ask_nl(
+            with st.spinner("Agents working..."):
+                agent_result = run_agent(
                     workspace=st.session_state.workspace,
                     table_name=selected_table,
                     question=nl_question.strip(),
                 )
 
-            if nl_result.success:
-                st.success(nl_result.explanation or "Query succeeded")
-                if nl_result.final_sql:
-                    with st.expander("Generated SQL (click to inspect / copy)", expanded=False):
-                        st.code(nl_result.final_sql, language="sql")
-                if nl_result.warnings:
-                    for w in nl_result.warnings:
-                        st.warning(w)
-                if nl_result.result_df is not None:
-                    st.dataframe(nl_result.result_df, width="stretch", hide_index=True)
-            else:
-                st.error(nl_result.error or "Something went wrong")
-                if nl_result.final_sql:
-                    with st.expander("Last attempted SQL"):
-                        st.code(nl_result.final_sql, language="sql")
-                if nl_result.warnings:
-                    for w in nl_result.warnings:
-                        st.info(w)
+            # Intent badge
+            intent_label = (agent_result.intent or "unknown").replace("_", " ").title()
+            st.caption(f"Route: **{intent_label}**" + (f" — {agent_result.intent_reason}" if agent_result.intent_reason else ""))
+
+            if agent_result.message:
+                if agent_result.success:
+                    st.success(agent_result.message)
+                else:
+                    st.error(agent_result.message)
+
+            # Clarify suggestions
+            if agent_result.clarify_questions:
+                st.markdown("**Try asking:**")
+                for q in agent_result.clarify_questions:
+                    st.markdown(f"- {q}")
+
+            # SQL evidence
+            if agent_result.sql:
+                with st.expander("Generated SQL (evidence)", expanded=False):
+                    st.code(agent_result.sql, language="sql")
+
+            # Result table
+            if agent_result.result_df is not None and agent_result.success:
+                st.dataframe(agent_result.result_df, width="stretch", hide_index=True)
+
+            # Business insight
+            if agent_result.insight:
+                st.markdown("#### Insight")
+                st.markdown(agent_result.insight)
+
+            # Warnings + pipeline steps (transparency)
+            if agent_result.warnings:
+                for w in agent_result.warnings:
+                    st.warning(w)
+
+            if agent_result.error and not agent_result.message:
+                st.error(agent_result.error)
+
+            with st.expander("Agent pipeline steps", expanded=False):
+                if agent_result.steps:
+                    st.code(" → ".join(agent_result.steps))
+                else:
+                    st.caption("No steps recorded.")
+                if agent_result.provider:
+                    st.caption(f"Provider: {agent_result.provider} · Model: {agent_result.model or '—'}")
 
     st.markdown("---")
 
