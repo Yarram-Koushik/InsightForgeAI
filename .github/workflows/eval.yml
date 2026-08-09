@@ -1,0 +1,30 @@
+# Phase 3.6 – Evaluation quality gate
+name: Eval Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  eval-offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pandas duckdb python-dotenv
+
+      - name: Unit tests (eval harness)
+        run: pytest tests/test_eval_harness.py -q
+
+      - name: Offline golden scorecard (fail under 80%)
+        run: python -m app.core.eval_harness --mode offline --fail-under 80

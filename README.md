@@ -4,7 +4,7 @@ AI-Powered Business Intelligence Assistant
 
 ## Status
 
-Phase 1 ✅ · Phase 2 ✅ · **Phase 3.1–3.5 ✅** · 3.6–3.7 planned
+Phase 1 ✅ · Phase 2 ✅ · **Phase 3.1–3.6 ✅** · 3.7 planned
 
 ## Phase 3 (Option B – Industry)
 
@@ -15,7 +15,7 @@ Phase 1 ✅ · Phase 2 ✅ · **Phase 3.1–3.5 ✅** · 3.6–3.7 planned
 | 3.3 Durable Workspace | ✅ |
 | 3.4 FastAPI Boundary | ✅ |
 | 3.5 Security, Auth, Audit | ✅ |
-| 3.6 Evaluation suite | Skeleton |
+| 3.6 Evaluation & Quality Gates | ✅ |
 | 3.7 Deployment & Ops | Planned |
 
 See `docs/PHASE3_PLAN.md`.
@@ -24,8 +24,6 @@ See `docs/PHASE3_PLAN.md`.
 
 ```bash
 pip install -r requirements.txt
-# optional auth – set in .env:
-# INSIGHTFORGE_API_KEYS=admin1:admin:sk-change-me
 
 # API
 uvicorn app.backend.main:app --reload --port 8000
@@ -34,20 +32,14 @@ uvicorn app.backend.main:app --reload --port 8000
 streamlit run app/frontend/app.py
 ```
 
-## Tests
+## Eval (Phase 3.6)
 
 ```bash
-pytest tests/ -q
+pytest tests/test_eval_harness.py -q
+python -m app.core.eval_harness --mode offline --fail-under 80
 ```
 
 ## Auth (Phase 3.5)
 
-When `INSIGHTFORGE_API_KEYS` is set, send:
-
-```
-X-API-Key: sk-change-me
-```
-
-or `Authorization: Bearer sk-change-me`.
-
+When `INSIGHTFORGE_API_KEYS` is set, send `X-API-Key: sk-change-me`.
 Roles: `viewer` · `analyst` · `admin`. `/health` stays public.
