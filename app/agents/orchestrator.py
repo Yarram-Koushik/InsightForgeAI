@@ -1,5 +1,5 @@
 """
-Orchestrator – LangGraph-style multi-agent pipeline for InsightForgeAI Phase 2.3.
+Orchestrator – LangGraph-style multi-agent pipeline for InsightForgeAI Phase 2.3/2.4.
 
 Pipeline:
   1. Validate inputs
@@ -7,8 +7,8 @@ Pipeline:
   3. Branch:
        META / UNSUPPORTED → direct response
        CLARIFY            → ClarifyAgent
-       DATA_QUERY         → SQLAgent
-       INSIGHT            → SQLAgent → InsightAgent
+       DATA_QUERY         → SQLAgent → VizAgent
+       INSIGHT            → SQLAgent → InsightAgent → VizAgent
   4. Package transparent AgentResult for the UI
 
 Design principles (industry):
@@ -49,6 +49,7 @@ _router = _load("router_agent", _AGENTS_DIR / "router.py")
 _sql = _load("sql_agent", _AGENTS_DIR / "sql_agent.py")
 _insight = _load("insight_agent", _AGENTS_DIR / "insight_agent.py")
 _clarify = _load("clarify_agent", _AGENTS_DIR / "clarify_agent.py")
+_viz = _load("viz_agent", _AGENTS_DIR / "viz_agent.py")
 
 
 def _meta_response(state: AgentState) -> AgentResult:
@@ -111,6 +112,9 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
         result_df=state.result_df,
         insight=state.insight_text,
         clarify_questions=list(state.clarify_questions),
+        chart_fig=getattr(state, "chart_fig", None),
+        chart_type=getattr(state, "chart_type", None),
+        chart_reason=getattr(state, "chart_reason", None),
         steps=list(state.steps),
         warnings=list(state.warnings),
         error=state.error,
@@ -125,18 +129,7 @@ def run_agent(
     table_name: str,
     question: str,
 ) -> AgentResult:
-    """
-    Main entry point used by the Streamlit UI.
-
-    Parameters
-    ----------
-    workspace : Workspace
-        The Phase-1/2 workspace (DuckDB + datasets).
-    table_name : str
-        Currently selected dataset / DuckDB table.
-    question : str
-        User's natural-language question.
-    """
+    """Main entry point used by the Streamlit UI."""
     state = AgentState(
         question=(question or "").strip(),
         table_name=table_name,
@@ -144,7 +137,6 @@ def run_agent(
     )
     state.steps.append("orchestrator:start")
 
-    # ---- Guard rails ----
     if not state.question:
         state.intent = Intent.CLARIFY
         state.intent_reason = "Empty question"
@@ -153,11 +145,7 @@ def run_agent(
             "What columns are available?",
             "Show me the first 10 rows",
         ]
-        return _from_state(
-            state,
-            success=False,
-            message="Please type a question about your data.",
-        )
+        return _from_state(state, success=False, message="Please type a question about your data.")
 
     if not table_name:
         return AgentResult(
@@ -179,7 +167,6 @@ def run_agent(
             steps=["orchestrator:no_workspace"],
         )
 
-    # Ensure table is registered in DuckDB
     try:
         record = workspace.get(table_name)
         if record and not record.metadata.get("duckdb_registered"):
@@ -188,7 +175,6 @@ def run_agent(
     except Exception as e:
         state.warnings.append(f"DuckDB registration check failed: {e}")
 
-    # ---- 1. Router ----
     try:
         state = _router.classify(state)
     except Exception as e:
@@ -199,7 +185,6 @@ def run_agent(
 
     intent = state.intent or Intent.DATA_QUERY
 
-    # ---- 2. Branch ----
     if intent == Intent.META:
         return _meta_response(state)
 
@@ -221,7 +206,6 @@ def run_agent(
             message="Your question is a bit broad. Try one of these more specific questions:",
         )
 
-    # DATA_QUERY or INSIGHT → always run SQL first
     try:
         state = _sql.run(state)
     except Exception as e:
@@ -237,7 +221,6 @@ def run_agent(
             message=state.sql_error or "Could not answer this question from the data.",
         )
 
-    # Optional insight stage
     if intent == Intent.INSIGHT:
         try:
             state = _insight.run(state)
@@ -245,10 +228,16 @@ def run_agent(
             state.warnings.append(f"Insight agent failed: {e}")
             state.steps.append("insight_agent:exception")
 
-    # For pure data queries we still add a one-line summary if insight is empty
     if not state.insight_text and state.result_df is not None:
         n = len(state.result_df)
         state.insight_text = f"Returned {n:,} row(s)."
+
+    # Visualization stage (Phase 2.4) – best-effort, never blocks the answer
+    try:
+        state = _viz.run(state)
+    except Exception as e:
+        state.warnings.append(f"Visualization agent failed: {e}")
+        state.steps.append("viz_agent:exception")
 
     msg = "Here is what I found."
     if state.insight_text and intent == Intent.INSIGHT:
@@ -258,5 +247,4 @@ def run_agent(
     return _from_state(state, success=True, message=msg)
 
 
-# Public alias used by frontend
 run = run_agent
