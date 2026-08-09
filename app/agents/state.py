@@ -41,6 +41,11 @@ class AgentState:
     # Insight stage
     insight_text: Optional[str] = None
 
+    # Visualization stage (Phase 2.4)
+    chart_fig: Any = None
+    chart_type: Optional[str] = None
+    chart_reason: Optional[str] = None
+
     # Clarify stage
     clarify_questions: List[str] = field(default_factory=list)
 
@@ -63,6 +68,11 @@ class AgentResult:
     result_df: Optional[pd.DataFrame] = None
     insight: Optional[str] = None
     clarify_questions: List[str] = field(default_factory=list)
+
+    # Chart (Phase 2.4)
+    chart_fig: Any = None
+    chart_type: Optional[str] = None
+    chart_reason: Optional[str] = None
 
     # Meta
     steps: List[str] = field(default_factory=list)

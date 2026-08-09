@@ -8,3 +8,4 @@ openpyxl
 pyarrow
 groq
 google-generativeai
+plotly
