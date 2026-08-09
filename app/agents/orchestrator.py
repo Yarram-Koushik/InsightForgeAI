@@ -1,16 +1,5 @@
-"""
-Orchestrator – multi-agent pipeline for InsightForgeAI Phase 2.3–2.5.
-
-Pipeline:
-  META / UNSUPPORTED → direct response
-  CLARIFY → ClarifyAgent
-  DATA_QUERY → SQLAgent → VizAgent
-  INSIGHT → SQLAgent → InsightAgent → VizAgent
-  FORECAST → SQLAgent → ForecastAgent (→ Viz fallback)
-"""
-
+"""Orchestrator – Phase 2.3–2.7 multi-agent pipeline."""
 from __future__ import annotations
-
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -42,7 +31,7 @@ _insight = _load("insight_agent", _AGENTS_DIR / "insight_agent.py")
 _clarify = _load("clarify_agent", _AGENTS_DIR / "clarify_agent.py")
 _viz = _load("viz_agent", _AGENTS_DIR / "viz_agent.py")
 _forecast = _load("forecast_agent", _AGENTS_DIR / "forecast_agent.py")
-
+_ctx = _load("context_memory", _AGENTS_DIR.parent / "core" / "context_memory.py")
 
 def _meta_response(state: AgentState) -> AgentResult:
     tables = []
@@ -54,110 +43,56 @@ def _meta_response(state: AgentState) -> AgentResult:
     table_list = ", ".join(f"`{t}`" for t in tables) if tables else "(none loaded)"
     msg = (
         "I am InsightForgeAI — an AI business intelligence assistant.\n\n"
-        "I can:\n"
-        "• Answer questions about your uploaded datasets in plain English\n"
-        "• Generate and run safe SQL (DuckDB)\n"
-        "• Explain results and run forecasts on time series\n\n"
-        f"Currently loaded datasets: {table_list}\n\n"
-        "Try asking: How many rows per category? or Forecast next 30 days."
+        "I can answer questions, run safe SQL, chart results, and forecast time series.\n\n"
+        f"Currently loaded datasets: {table_list}"
     )
-    return AgentResult(
-        success=True,
-        question=state.question,
-        intent=Intent.META.value,
-        intent_reason=state.intent_reason,
-        message=msg,
-        steps=state.steps + ["meta:done"],
-        warnings=state.warnings,
-        provider=state.provider,
-        model=state.model,
-    )
-
+    return AgentResult(success=True, question=state.question, intent=Intent.META.value, intent_reason=state.intent_reason, message=msg, steps=state.steps + ["meta:done"], warnings=state.warnings, provider=state.provider, model=state.model)
 
 def _unsupported_response(state: AgentState) -> AgentResult:
-    msg = (
-        "This question cannot be answered from the currently loaded tabular data.\n"
-        "I only analyse the datasets you upload (CSV / Excel / Parquet / JSON).\n"
-        "Try a question about columns in the selected dataset."
-    )
-    return AgentResult(
-        success=False,
-        question=state.question,
-        intent=Intent.UNSUPPORTED.value,
-        intent_reason=state.intent_reason,
-        message=msg,
-        error="Unsupported question type for current data.",
-        steps=state.steps + ["unsupported:done"],
-        warnings=state.warnings,
-        provider=state.provider,
-        model=state.model,
-    )
-
+    msg = "This question cannot be answered from the currently loaded tabular data."
+    return AgentResult(success=False, question=state.question, intent=Intent.UNSUPPORTED.value, intent_reason=state.intent_reason, message=msg, error="Unsupported question type for current data.", steps=state.steps + ["unsupported:done"], warnings=state.warnings, provider=state.provider, model=state.model)
 
 def _from_state(state: AgentState, success: bool, message: Optional[str] = None) -> AgentResult:
     return AgentResult(
-        success=success,
-        question=state.question,
+        success=success, question=state.question,
         intent=(state.intent.value if state.intent else "unknown"),
-        intent_reason=state.intent_reason,
-        sql=state.sql,
-        result_df=state.result_df,
-        insight=state.insight_text,
-        clarify_questions=list(state.clarify_questions),
-        chart_fig=getattr(state, "chart_fig", None),
-        chart_type=getattr(state, "chart_type", None),
+        intent_reason=state.intent_reason, sql=state.sql, result_df=state.result_df,
+        insight=state.insight_text, clarify_questions=list(state.clarify_questions),
+        chart_fig=getattr(state, "chart_fig", None), chart_type=getattr(state, "chart_type", None),
         chart_reason=getattr(state, "chart_reason", None),
         forecast_df=getattr(state, "forecast_df", None),
         forecast_method=getattr(state, "forecast_method", None),
         forecast_horizon=getattr(state, "forecast_horizon", None),
         trend_summary=getattr(state, "trend_summary", None),
         anomalies=list(getattr(state, "anomalies", []) or []),
-        steps=list(state.steps),
-        warnings=list(state.warnings),
-        error=state.error,
-        provider=state.provider,
-        model=state.model,
-        message=message,
+        steps=list(state.steps), warnings=list(state.warnings), error=state.error,
+        provider=state.provider, model=state.model, message=message,
     )
 
-
-def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
-    state = AgentState(
-        question=(question or "").strip(),
-        table_name=table_name,
-        workspace=workspace,
-    )
+def run_agent(workspace: Any, table_name: str, question: str, history: Any = None) -> AgentResult:
+    state = AgentState(question=(question or "").strip(), table_name=table_name, workspace=workspace)
     state.steps.append("orchestrator:start")
+
+    try:
+        if history:
+            expanded = _ctx.expand_question_with_history(state.question, history)
+            if expanded != state.question:
+                state.warnings.append("Follow-up resolved using prior conversation context.")
+                state.question = expanded
+    except Exception as e:
+        state.warnings.append(f"Context expansion skipped: {e}")
 
     if not state.question:
         state.intent = Intent.CLARIFY
         state.intent_reason = "Empty question"
-        state.clarify_questions = [
-            "How many rows are in this dataset?",
-            "What columns are available?",
-            "Show me the first 10 rows",
-        ]
+        state.clarify_questions = ["How many rows are in this dataset?", "What columns are available?"]
         return _from_state(state, success=False, message="Please type a question about your data.")
 
     if not table_name:
-        return AgentResult(
-            success=False,
-            question=state.question,
-            intent=Intent.CLARIFY.value,
-            message="Select a dataset from the sidebar before asking a question.",
-            error="No dataset selected.",
-            steps=["orchestrator:no_table"],
-        )
+        return AgentResult(success=False, question=state.question, intent=Intent.CLARIFY.value, message="Select a dataset from the sidebar before asking a question.", error="No dataset selected.", steps=["orchestrator:no_table"])
 
     if workspace is None:
-        return AgentResult(
-            success=False,
-            question=state.question,
-            intent="error",
-            message="Workspace is not initialised.",
-            error="Workspace is None",
-            steps=["orchestrator:no_workspace"],
-        )
+        return AgentResult(success=False, question=state.question, intent="error", message="Workspace is not initialised.", error="Workspace is None", steps=["orchestrator:no_workspace"])
 
     try:
         record = workspace.get(table_name)
@@ -176,26 +111,17 @@ def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
         state.steps.append("router:exception")
 
     intent = state.intent or Intent.DATA_QUERY
-
     if intent == Intent.META:
         return _meta_response(state)
     if intent == Intent.UNSUPPORTED:
         return _unsupported_response(state)
-
     if intent == Intent.CLARIFY:
         try:
             state = _clarify.run(state)
         except Exception as e:
-            state.clarify_questions = [
-                "How many rows are in this dataset?",
-                "Show distinct values for the main category column",
-            ]
+            state.clarify_questions = ["How many rows are in this dataset?"]
             state.warnings.append(f"Clarify agent failed: {e}")
-        return _from_state(
-            state,
-            success=True,
-            message="Your question is a bit broad. Try one of these more specific questions:",
-        )
+        return _from_state(state, success=True, message="Your question is a bit broad. Try one of these more specific questions:")
 
     try:
         state = _sql.run(state)
@@ -206,11 +132,7 @@ def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
         return _from_state(state, success=False, message=state.error)
 
     if not state.sql_success:
-        return _from_state(
-            state,
-            success=False,
-            message=state.sql_error or "Could not answer this question from the data.",
-        )
+        return _from_state(state, success=False, message=state.sql_error or "Could not answer this question from the data.")
 
     if intent == Intent.INSIGHT:
         try:
@@ -237,8 +159,7 @@ def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
             return _from_state(state, success=True, message=msg)
 
     if not state.insight_text and state.result_df is not None:
-        n = len(state.result_df)
-        state.insight_text = f"Returned {n:,} row(s)."
+        state.insight_text = f"Returned {len(state.result_df):,} row(s)."
 
     if getattr(state, "chart_fig", None) is None:
         try:
@@ -255,6 +176,5 @@ def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
 
     state.steps.append("orchestrator:done")
     return _from_state(state, success=True, message=msg)
-
 
 run = run_agent
