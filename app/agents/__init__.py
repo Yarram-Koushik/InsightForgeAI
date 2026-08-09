@@ -1,13 +1,10 @@
 """
-InsightForgeAI – Multi-Agent Layer (Phase 2.3)
+InsightForgeAI – Multi-Agent Layer (Phase 2.3 / 2.4)
 
-LangGraph-style orchestration without heavy framework lock-in.
 Agents:
-  - RouterAgent: classifies intent
-  - SQLAgent: NL → SQL → execute (wraps Phase 2.2)
-  - InsightAgent: business interpretation of results
-  - ClarifyAgent: asks for missing context
-  - Orchestrator: runs the pipeline with full transparency
+  - RouterAgent, SQLAgent, InsightAgent, ClarifyAgent
+  - VizAgent (Phase 2.4) – automatic Plotly charts
+  - Orchestrator – runs the pipeline with full transparency
 """
 
 from .orchestrator import run_agent, AgentResult

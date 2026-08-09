@@ -17,8 +17,8 @@ ChatGPT for company data — production-grade, free-stack, multi-agent system.
 - DuckDB + Pandas + Polars
 - LangGraph-style multi-agent orchestration
 - Groq / Gemini / Ollama
-- ChromaDB
-- Prophet + Plotly
+- Plotly
+- Prophet
 - Docker
 
 ## Current Status
@@ -26,51 +26,40 @@ ChatGPT for company data — production-grade, free-stack, multi-agent system.
 | Phase | Status | Description |
 |-------|--------|-------------|
 | **Phase 0** | ✅ Complete | Project foundation & structure |
-| **Phase 1** | ✅ Complete | Industry-level data foundation: multi-format ingestion, semantic schema detection, safe auto-cleaning + lineage, transparent quality scoring, Workspace management |
+| **Phase 1** | ✅ Complete | Industry-level data foundation |
 | **Phase 2** | 🚧 In Progress | Intelligent Analysis Layer |
-| → Sub-Phase 2.1 | ✅ Complete | DuckDB Query Engine – auto-register tables, safe SQL, schema inspection |
-| → Sub-Phase 2.2 | ✅ Complete | LLM client (Groq/Gemini) + self-correcting Natural Language → SQL |
-| → Sub-Phase 2.3 | ✅ Complete | Multi-agent orchestration (Router · SQL · Insight · Clarify) |
-| → Sub-Phase 2.4 | Planned | Automated Plotly visualizations |
+| → Sub-Phase 2.1 | ✅ Complete | DuckDB Query Engine |
+| → Sub-Phase 2.2 | ✅ Complete | NL → SQL (self-correcting) |
+| → Sub-Phase 2.3 | ✅ Complete | Multi-agent orchestration |
+| → Sub-Phase 2.4 | ✅ Complete | Automated Plotly visualizations |
 | → Sub-Phase 2.5 | Planned | Forecasting (Prophet) & advanced analytics |
 | → Sub-Phase 2.6 | Planned | Full chat UI + evidence grounding + export |
 
+## Phase 2.4 Highlights
+
+- Rule-based chart recommendation (bar / line / pie / scatter / histogram / KPI)
+- Auto Plotly charts after every successful data answer
+- Top-N handling for high-cardinality categories
+- Edge cases: empty results, single value KPI, too-wide tables, missing plotly
+- Chart reason shown for transparency
+
 ## Phase 2.3 Highlights
 
-- **Router Agent** – classifies every question (data / insight / clarify / meta / unsupported)
-- **SQL Agent** – reuses Phase 2.2 self-correcting NL→SQL
-- **Insight Agent** – short business interpretation of query results
-- **Clarify Agent** – concrete follow-up questions when the ask is vague
+- Router / SQL / Insight / Clarify agents
 - Full pipeline transparency (route, SQL evidence, agent steps)
 - Graceful degradation when API keys are missing
-
-## Phase 1 Highlights
-
-- Multi-file / multi-sheet Excel support
-- Semantic type detection (Email, URL, Phone, Currency, DateTime, Identifier, Categorical, Free Text…)
-- Confidence-scored safe auto-cleaning with full change lineage
-- Multi-dimensional quality score (Completeness 50% + Uniqueness 30% + Validity 20%)
-- Session Workspace with raw + cleaned versions of every dataset
 
 ## How to Run
 
 ```bash
-# Install
-uv sync   # or pip install -r requirements.txt
-
-# Add API keys
-cp .env.example .env
-# Edit .env → GROQ_API_KEY=...
-
-# Launch
+pip install -r requirements.txt
+cp .env.example .env   # add GROQ_API_KEY
 streamlit run app/frontend/app.py
 ```
 
 ## Project Structure
 
-- `app/core/` → ingestion, schema, cleaning, profiling, data_manager (DuckDB), llm_client, nl_to_sql
-- `app/agents/` → multi-agent orchestration (Phase 2.3)
+- `app/core/` → ingestion, schema, cleaning, profiling, data_manager, llm_client, nl_to_sql, **visualization**
+- `app/agents/` → multi-agent orchestration + **viz_agent**
 - `app/frontend/` → Streamlit UI
-- `data/` → Sample datasets
-- `docs/` → Documentation & phase plans
-- `tests/` → Unit tests
+- `docs/` → phase plans
