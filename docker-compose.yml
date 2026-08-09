@@ -1,0 +1,56 @@
+# InsightForgeAI stack – Phase 3.7
+# Usage:
+#   cp .env.example .env
+#   docker compose up --build
+#
+# API:  http://localhost:8000/health
+# UI:   http://localhost:8501
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: insightforge-api:3.7
+    container_name: insightforge-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      RATE_LIMIT_PER_SEC: ${RATE_LIMIT_PER_SEC:-5}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-20}
+    volumes:
+      - if_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ui
+    image: insightforge-ui:3.7
+    container_name: insightforge-ui
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      INSIGHTFORGE_API_URL: ${INSIGHTFORGE_API_URL:-http://api:8000}
+    volumes:
+      - if_data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  if_data:
+    name: insightforge_data
