@@ -298,7 +298,7 @@ if selected_table:
                 st.markdown(f"#### Chart · {chart_label}")
                 if reason:
                     st.caption(reason)
-                st.plotly_chart(agent_result.chart_fig, use_container_width=True)
+                st.plotly_chart(agent_result.chart_fig, width="stretch")
 
             if agent_result.result_df is not None and agent_result.success:
                 with st.expander("Data table", expanded=getattr(agent_result, "chart_fig", None) is None):
