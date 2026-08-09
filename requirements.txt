@@ -4,3 +4,7 @@ streamlit
 pandas
 duckdb
 python-dotenv
+openpyxl
+pyarrow
+groq
+google-generativeai
