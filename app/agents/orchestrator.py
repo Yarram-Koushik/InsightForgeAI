@@ -1,21 +1,12 @@
 """
-Orchestrator – LangGraph-style multi-agent pipeline for InsightForgeAI Phase 2.3/2.4.
+Orchestrator – multi-agent pipeline for InsightForgeAI Phase 2.3–2.5.
 
 Pipeline:
-  1. Validate inputs
-  2. Router  → intent
-  3. Branch:
-       META / UNSUPPORTED → direct response
-       CLARIFY            → ClarifyAgent
-       DATA_QUERY         → SQLAgent → VizAgent
-       INSIGHT            → SQLAgent → InsightAgent → VizAgent
-  4. Package transparent AgentResult for the UI
-
-Design principles (industry):
-  - Never crash the UI
-  - Prefer "I don't know" / clarify over hallucination
-  - Always expose SQL + steps for auditability
-  - Graceful degradation when LLM keys are missing
+  META / UNSUPPORTED → direct response
+  CLARIFY → ClarifyAgent
+  DATA_QUERY → SQLAgent → VizAgent
+  INSIGHT → SQLAgent → InsightAgent → VizAgent
+  FORECAST → SQLAgent → ForecastAgent (→ Viz fallback)
 """
 
 from __future__ import annotations
@@ -50,6 +41,7 @@ _sql = _load("sql_agent", _AGENTS_DIR / "sql_agent.py")
 _insight = _load("insight_agent", _AGENTS_DIR / "insight_agent.py")
 _clarify = _load("clarify_agent", _AGENTS_DIR / "clarify_agent.py")
 _viz = _load("viz_agent", _AGENTS_DIR / "viz_agent.py")
+_forecast = _load("forecast_agent", _AGENTS_DIR / "forecast_agent.py")
 
 
 def _meta_response(state: AgentState) -> AgentResult:
@@ -65,9 +57,9 @@ def _meta_response(state: AgentState) -> AgentResult:
         "I can:\n"
         "• Answer questions about your uploaded datasets in plain English\n"
         "• Generate and run safe SQL (DuckDB)\n"
-        "• Explain results in business language\n\n"
+        "• Explain results and run forecasts on time series\n\n"
         f"Currently loaded datasets: {table_list}\n\n"
-        "Try asking: How many rows per category? or Show the top 10 values."
+        "Try asking: How many rows per category? or Forecast next 30 days."
     )
     return AgentResult(
         success=True,
@@ -115,6 +107,11 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
         chart_fig=getattr(state, "chart_fig", None),
         chart_type=getattr(state, "chart_type", None),
         chart_reason=getattr(state, "chart_reason", None),
+        forecast_df=getattr(state, "forecast_df", None),
+        forecast_method=getattr(state, "forecast_method", None),
+        forecast_horizon=getattr(state, "forecast_horizon", None),
+        trend_summary=getattr(state, "trend_summary", None),
+        anomalies=list(getattr(state, "anomalies", []) or []),
         steps=list(state.steps),
         warnings=list(state.warnings),
         error=state.error,
@@ -124,12 +121,7 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
     )
 
 
-def run_agent(
-    workspace: Any,
-    table_name: str,
-    question: str,
-) -> AgentResult:
-    """Main entry point used by the Streamlit UI."""
+def run_agent(workspace: Any, table_name: str, question: str) -> AgentResult:
     state = AgentState(
         question=(question or "").strip(),
         table_name=table_name,
@@ -187,7 +179,6 @@ def run_agent(
 
     if intent == Intent.META:
         return _meta_response(state)
-
     if intent == Intent.UNSUPPORTED:
         return _unsupported_response(state)
 
@@ -228,20 +219,39 @@ def run_agent(
             state.warnings.append(f"Insight agent failed: {e}")
             state.steps.append("insight_agent:exception")
 
+    if intent == Intent.FORECAST:
+        try:
+            state = _forecast.run(state)
+        except Exception as e:
+            state.warnings.append(f"Forecast agent failed: {e}")
+            state.steps.append("forecast_agent:exception")
+        if not getattr(state, "forecast_success", False):
+            msg = state.forecast_error or "Could not produce a forecast from this data."
+            if not state.insight_text:
+                state.insight_text = msg
+            try:
+                state = _viz.run(state)
+            except Exception:
+                pass
+            state.steps.append("orchestrator:done")
+            return _from_state(state, success=True, message=msg)
+
     if not state.insight_text and state.result_df is not None:
         n = len(state.result_df)
         state.insight_text = f"Returned {n:,} row(s)."
 
-    # Visualization stage (Phase 2.4) – best-effort, never blocks the answer
-    try:
-        state = _viz.run(state)
-    except Exception as e:
-        state.warnings.append(f"Visualization agent failed: {e}")
-        state.steps.append("viz_agent:exception")
+    if getattr(state, "chart_fig", None) is None:
+        try:
+            state = _viz.run(state)
+        except Exception as e:
+            state.warnings.append(f"Visualization agent failed: {e}")
+            state.steps.append("viz_agent:exception")
 
     msg = "Here is what I found."
-    if state.insight_text and intent == Intent.INSIGHT:
+    if intent == Intent.INSIGHT:
         msg = "Here is the data and a short business interpretation."
+    elif intent == Intent.FORECAST:
+        msg = "Here is the forecast and trend analysis."
 
     state.steps.append("orchestrator:done")
     return _from_state(state, success=True, message=msg)
