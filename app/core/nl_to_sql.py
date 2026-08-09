@@ -25,15 +25,16 @@ _CORE_DIR = Path(__file__).resolve().parent
 if str(_CORE_DIR.parent.parent) not in sys.path:
     sys.path.insert(0, str(_CORE_DIR.parent.parent))
 
-try:
-    from app.core.llm_client import get_llm_client, LLMResponse
-except ImportError:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("llm_client", _CORE_DIR / "llm_client.py")
-    llm_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(llm_mod)
-    get_llm_client = llm_mod.get_llm_client
-    LLMResponse = llm_mod.LLMResponse
+# Always load llm_client via importlib and register it in sys.modules.
+# This is required so that @dataclass works correctly under dynamic loading.
+import importlib.util
+_llm_path = _CORE_DIR / "llm_client.py"
+_llm_spec = importlib.util.spec_from_file_location("llm_client", _llm_path)
+llm_mod = importlib.util.module_from_spec(_llm_spec)
+sys.modules["llm_client"] = llm_mod          # CRITICAL: must register before exec_module
+_llm_spec.loader.exec_module(llm_mod)
+get_llm_client = llm_mod.get_llm_client
+LLMResponse = llm_mod.LLMResponse
 
 
 @dataclass
@@ -79,6 +80,7 @@ def build_schema_context(
         schema_path = _CORE_DIR / "schema.py"
         spec = importlib.util.spec_from_file_location("schema_mod", schema_path)
         schema_mod = importlib.util.module_from_spec(spec)
+        sys.modules["schema_mod"] = schema_mod   # register before exec
         spec.loader.exec_module(schema_mod)
         semantic_df = schema_mod.detect_schema_semantic(record.cleaned_df)
         semantic_map = {row["column"]: row for _, row in semantic_df.iterrows()}
