@@ -62,7 +62,7 @@ st.set_page_config(
 
 st.title("InsightForgeAI")
 st.markdown("### AI-Powered Business Intelligence Assistant")
-st.caption("Phase 1 – Industry Upgrade in Progress")
+st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.1: DuckDB Query Engine")
 st.markdown("---")
 
 # ====================== HELPER FUNCTIONS (Temporary - will move later) ======================
@@ -234,6 +234,9 @@ if uploaded_files:
                             record = st.session_state.workspace.get(final_name)
                             record.apply_cleaning(cleaned_df, issues, change_log)
 
+                            # Phase 2.1: Register cleaned data in DuckDB for SQL querying
+                            st.session_state.workspace.register_in_duckdb(final_name)
+
                             st.sidebar.success(f"Loaded: {final_name}")
 
                         except Exception as e:
@@ -258,6 +261,9 @@ if uploaded_files:
 
                     record = st.session_state.workspace.get(final_name)
                     record.apply_cleaning(cleaned_df, issues, change_log)
+
+                    # Phase 2.1: Register cleaned data in DuckDB for SQL querying
+                    st.session_state.workspace.register_in_duckdb(final_name)
 
                     st.sidebar.success(f"Loaded: {final_name}")
 
@@ -294,7 +300,7 @@ if selected_table:
     else:
         df = record.raw_df
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Schema", "Cleaning & Lineage", "Data Profile", "Data Preview"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Schema", "Cleaning & Lineage", "Data Profile", "Data Preview", "SQL Query"])
 
     with tab1:
         st.markdown("#### Semantic Schema Detection")
@@ -370,6 +376,41 @@ if selected_table:
 
     with tab4:
         st.dataframe(df.head(30), width="stretch")
+
+    with tab5:
+        st.markdown("#### SQL Query Engine (DuckDB)")
+        st.caption("Phase 2.1 – Query any cleaned dataset with full SQL power. Tables are automatically registered after cleaning.")
+
+        available_tables = st.session_state.workspace.list_duckdb_tables()
+        if available_tables:
+            st.markdown(f"**Available tables:** `{', '.join(available_tables)}`")
+        else:
+            st.warning("No tables registered yet. Load and clean a dataset first.")
+
+        # Quick schema helper
+        if available_tables:
+            selected_for_schema = st.selectbox("Inspect table schema", options=available_tables, key="schema_inspect")
+            if selected_for_schema:
+                schema_info = st.session_state.workspace.get_table_schema(selected_for_schema)
+                st.dataframe(schema_info, width="stretch", hide_index=True)
+
+        default_sql = f'SELECT * FROM "{selected_table}" LIMIT 20' if selected_table else "SELECT 1"
+        sql_query = st.text_area("Write your SQL query", value=default_sql, height=120, key="sql_input")
+
+        col_run, col_info = st.columns([1, 3])
+        with col_run:
+            run_query = st.button("▶ Run Query", type="primary")
+        with col_info:
+            st.caption("Only SELECT / WITH / DESCRIBE / SHOW / EXPLAIN are allowed (read-only).")
+
+        if run_query and sql_query.strip():
+            with st.spinner("Executing..."):
+                result_df, error = st.session_state.workspace.execute_sql(sql_query)
+            if error:
+                st.error(f"Query error: {error}")
+            else:
+                st.success(f"Returned {len(result_df):,} rows × {len(result_df.columns)} columns")
+                st.dataframe(result_df, width="stretch", hide_index=True)
 
 else:
     st.info("Upload files from the sidebar to get started.")
