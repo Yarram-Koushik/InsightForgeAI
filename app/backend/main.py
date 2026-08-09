@@ -1,26 +1,15 @@
 """
-InsightForgeAI – FastAPI Backend Boundary (Phase 3.4)
+InsightForgeAI – FastAPI Backend Boundary (Phase 3.4–3.7)
 
-Makes the multi-agent orchestrator callable over HTTP so Streamlit
-(or any other client) is just one front-end.
-
-Endpoints
----------
-  GET  /health
-  GET  /datasets
-  GET  /datasets/{name}/schema
-  POST /datasets/upload
-  POST /ask
-  POST /sql
-  GET  /audit   (Phase 3.5 – admin)
-
-Phase 3.5 adds API-key auth, role gates, and audit logging.
+Endpoints: /health /ready /metrics /datasets /upload /ask /sql /audit
+Phase 3.5 auth + Phase 3.7 observability (logs, rate limit, metrics).
 """
 
 from __future__ import annotations
 
 import io
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Optional
@@ -30,11 +19,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, Uplo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# ---------------------------------------------------------------------------
-# Path bootstrap
-# ---------------------------------------------------------------------------
 _BACKEND_DIR = Path(__file__).resolve().parent
-
 _candidates = [
     _BACKEND_DIR.parents[1] if len(_BACKEND_DIR.parents) > 1 else _BACKEND_DIR,
     _BACKEND_DIR.parents[2] if len(_BACKEND_DIR.parents) > 2 else _BACKEND_DIR,
@@ -92,7 +77,6 @@ def _load_orchestrator():
     return mod
 
 
-# Schemas
 try:
     from app.backend.schemas import (
         AskRequest, AskResponse, DatasetInfo, DatasetsResponse,
@@ -118,7 +102,6 @@ except ImportError:
     SqlResponse = _sch.SqlResponse
     UploadResponse = _sch.UploadResponse
 
-# Phase 3.5 – Security
 try:
     from app.core.security import (
         Role, Principal, auth_enabled, authenticate, require_role,
@@ -145,10 +128,28 @@ except ImportError:
     validate_upload = _sec.validate_upload
     MAX_UPLOAD_BYTES = _sec.MAX_UPLOAD_BYTES
 
+try:
+    from app.core.observability import (
+        log_event, METRICS, RATE_LIMITER, readiness_checks,
+    )
+except ImportError:
+    import importlib.util as _ilu
+    _obs_path = (_APP_DIR / "core" / "observability.py") if _APP_DIR else Path("observability.py")
+    if not _obs_path.exists():
+        _obs_path = Path(__file__).resolve().parent.parent / "core" / "observability.py"
+    _obs_spec = _ilu.spec_from_file_location("api_obs", _obs_path)
+    _obs = _ilu.module_from_spec(_obs_spec)
+    sys.modules["api_obs"] = _obs
+    _obs_spec.loader.exec_module(_obs)
+    log_event = _obs.log_event
+    METRICS = _obs.METRICS
+    RATE_LIMITER = _obs.RATE_LIMITER
+    readiness_checks = _obs.readiness_checks
+
 app = FastAPI(
     title="InsightForgeAI API",
-    description="Backend boundary for the multi-agent BI assistant (Phase 3.4 + 3.5 auth)",
-    version="0.3.5",
+    description="Backend boundary for the multi-agent BI assistant (Phase 3.4–3.7)",
+    version="0.3.7",
 )
 
 app.add_middleware(
@@ -158,6 +159,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    path = request.url.path
+    start = time.perf_counter()
+    if path not in ("/health", "/ready", "/metrics"):
+        key = request.headers.get("x-api-key") or ""
+        if not key:
+            auth = request.headers.get("authorization") or ""
+            if auth.lower().startswith("bearer "):
+                key = auth[7:].strip()
+        if not key and request.client:
+            key = f"ip:{request.client.host}"
+        if not key:
+            key = "anonymous"
+        allowed, retry_after = RATE_LIMITER.allow(key)
+        if not allowed:
+            log_event("rate_limited", path=path, key=key[:32], retry_after=retry_after)
+            METRICS.record_request(path, 429, (time.perf_counter() - start) * 1000)
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "success": False,
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "message": "Too many requests",
+                        "detail": f"Retry after {retry_after}s",
+                    },
+                },
+                headers={"Retry-After": str(int(retry_after) + 1)},
+            )
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception as e:
+        latency = (time.perf_counter() - start) * 1000
+        log_event("request_error", path=path, method=request.method, error=str(e)[:300], latency_ms=round(latency, 1))
+        METRICS.record_request(path, 500, latency)
+        raise
+    latency = (time.perf_counter() - start) * 1000
+    METRICS.record_request(path, status, latency)
+    log_event("request", path=path, method=request.method, status=status, latency_ms=round(latency, 1))
+    return response
+
 
 _workspace = None
 _dm = None
@@ -229,10 +275,6 @@ def _error(code: str, message: str, status: int = 400, detail: str = None):
     )
 
 
-# ---------------------------------------------------------------------------
-# Auth dependency (Phase 3.5)
-# ---------------------------------------------------------------------------
-
 def _extract_api_key(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
@@ -284,13 +326,21 @@ def _client_ip(request: Request) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse()
+    return HealthResponse(version="0.3.7")
+
+
+@app.get("/ready")
+def ready():
+    checks = readiness_checks()
+    status = 200 if checks.get("ready") else 503
+    return JSONResponse(status_code=status, content=checks)
+
+
+@app.get("/metrics")
+def metrics():
+    return METRICS.snapshot()
 
 
 @app.get("/datasets", response_model=DatasetsResponse)
@@ -347,7 +397,6 @@ async def upload_dataset(
     global _ingestion, _cleaning
     if _ingestion is None or _cleaning is None:
         _, _ingestion, _cleaning = _load_core()
-
     filename = file.filename or "upload.csv"
     try:
         content = await file.read()
@@ -358,10 +407,8 @@ async def upload_dataset(
             return _error("FILE_TOO_LARGE", f"File exceeds {MAX_UPLOAD_BYTES // (1024*1024)} MB limit", 413)
         if reject and reject.startswith("UNSUPPORTED_TYPE"):
             return _error("UNSUPPORTED_TYPE", f"Unsupported file type: {reject.split(':',1)[-1]}", 415)
-
         bio = io.BytesIO(content)
         bio.name = filename
-
         try:
             if filename.lower().endswith((".xlsx", ".xls")):
                 raw_df = _ingestion.read_file(bio, sheet_name=0)
@@ -369,34 +416,25 @@ async def upload_dataset(
                 raw_df = _ingestion.read_file(bio)
         except Exception as e:
             return _error("PARSE_FAILED", f"Could not parse file: {e}", 400)
-
         if raw_df is None or raw_df.empty:
             return _error("EMPTY_DATA", "Parsed DataFrame is empty", 400)
-
         table_name = _ingestion.make_safe_table_name(Path(filename).stem)
         final_name = ws.add_dataset(name=table_name, raw_df=raw_df, source_filename=filename)
-
         issues = _cleaning.detect_cleaning_issues(raw_df)
         cleaned_df, change_log = _cleaning.apply_safe_cleaning(raw_df, issues)
         record = ws.get(final_name)
         record.apply_cleaning(cleaned_df, issues, change_log)
         ws.register_in_duckdb(final_name)
-
         audit_log(AuditEvent(
-            timestamp=now_iso(),
-            action="upload",
+            timestamp=now_iso(), action="upload",
             principal_id=(principal.key_id if principal else "anonymous"),
             role=(principal.role.value if principal else "none"),
-            table_name=final_name,
-            success=True,
-            result_rows=len(cleaned_df),
+            table_name=final_name, success=True, result_rows=len(cleaned_df),
             ip=_client_ip(request),
             extra={"filename": filename, "columns": len(cleaned_df.columns)},
         ))
         return UploadResponse(
-            success=True,
-            table_name=final_name,
-            rows=len(cleaned_df),
+            success=True, table_name=final_name, rows=len(cleaned_df),
             columns=len(cleaned_df.columns),
             message=f"Loaded and cleaned as `{final_name}`",
             warnings=[f"{len(issues)} issue(s) detected"] if issues else [],
@@ -414,41 +452,27 @@ def ask(
     ws = get_workspace()
     if req.table_name not in ws.list_datasets():
         audit_log(AuditEvent(
-            timestamp=now_iso(),
-            action="ask",
+            timestamp=now_iso(), action="ask",
             principal_id=(principal.key_id if principal else "anonymous"),
             role=(principal.role.value if principal else "none"),
-            table_name=req.table_name,
-            question=req.question[:500],
-            success=False,
-            error_code="DATASET_NOT_FOUND",
-            ip=_client_ip(request),
+            table_name=req.table_name, question=req.question[:500],
+            success=False, error_code="DATASET_NOT_FOUND", ip=_client_ip(request),
         ))
-        return _error(
-            "DATASET_NOT_FOUND",
-            f"Dataset '{req.table_name}' is not loaded. Upload or select a dataset first.",
-            404,
-        )
-
+        return _error("DATASET_NOT_FOUND", f"Dataset '{req.table_name}' is not loaded.", 404)
     try:
         orch = _load_orchestrator()
         result = orch.run_agent(
-            workspace=ws,
-            table_name=req.table_name,
-            question=req.question,
-            history=req.history,
+            workspace=ws, table_name=req.table_name,
+            question=req.question, history=req.history,
         )
         resp = _agent_result_to_response(result)
         audit_log(AuditEvent(
-            timestamp=now_iso(),
-            action="ask",
+            timestamp=now_iso(), action="ask",
             principal_id=(principal.key_id if principal else "anonymous"),
             role=(principal.role.value if principal else "none"),
-            table_name=req.table_name,
-            question=req.question[:500],
+            table_name=req.table_name, question=req.question[:500],
             sql=(resp.sql[:2000] if resp.sql else None),
-            success=resp.success,
-            intent=resp.intent,
+            success=resp.success, intent=resp.intent,
             result_rows=resp.result_row_count,
             error_code=None if resp.success else (resp.error or "ASK_FAILED"),
             ip=_client_ip(request),
@@ -457,23 +481,14 @@ def ask(
         return resp
     except Exception as e:
         audit_log(AuditEvent(
-            timestamp=now_iso(),
-            action="ask",
+            timestamp=now_iso(), action="ask",
             principal_id=(principal.key_id if principal else "anonymous"),
             role=(principal.role.value if principal else "none"),
-            table_name=req.table_name,
-            question=req.question[:500],
-            success=False,
-            error_code="AGENT_FAILED",
-            ip=_client_ip(request),
+            table_name=req.table_name, question=req.question[:500],
+            success=False, error_code="AGENT_FAILED", ip=_client_ip(request),
             extra={"exception": str(e)[:300]},
         ))
-        return _error(
-            "AGENT_FAILED",
-            f"Orchestrator failed: {e}",
-            500,
-            detail=traceback.format_exc()[-800:],
-        )
+        return _error("AGENT_FAILED", f"Orchestrator failed: {e}", 500, detail=traceback.format_exc()[-800:])
 
 
 @app.post("/sql", response_model=SqlResponse)
@@ -487,37 +502,23 @@ def run_sql(
         df, err = ws.execute_sql(req.sql)
         if err:
             audit_log(AuditEvent(
-                timestamp=now_iso(),
-                action="sql",
+                timestamp=now_iso(), action="sql",
                 principal_id=(principal.key_id if principal else "anonymous"),
                 role=(principal.role.value if principal else "none"),
-                table_name=req.table_name,
-                sql=req.sql[:2000],
-                success=False,
-                error_code="SQL_ERROR",
-                ip=_client_ip(request),
+                table_name=req.table_name, sql=req.sql[:2000],
+                success=False, error_code="SQL_ERROR", ip=_client_ip(request),
                 extra={"error": err[:300]},
             ))
             return SqlResponse(success=False, sql=req.sql, error=err)
         records, cols, n = _df_to_records(df)
         audit_log(AuditEvent(
-            timestamp=now_iso(),
-            action="sql",
+            timestamp=now_iso(), action="sql",
             principal_id=(principal.key_id if principal else "anonymous"),
             role=(principal.role.value if principal else "none"),
-            table_name=req.table_name,
-            sql=req.sql[:2000],
-            success=True,
-            result_rows=n,
-            ip=_client_ip(request),
+            table_name=req.table_name, sql=req.sql[:2000],
+            success=True, result_rows=n, ip=_client_ip(request),
         ))
-        return SqlResponse(
-            success=True,
-            sql=req.sql,
-            result=records,
-            result_columns=cols,
-            result_row_count=n,
-        )
+        return SqlResponse(success=True, sql=req.sql, result=records, result_columns=cols, result_row_count=n)
     except Exception as e:
         return SqlResponse(success=False, sql=req.sql, error=str(e))
 
