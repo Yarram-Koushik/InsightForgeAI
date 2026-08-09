@@ -112,6 +112,23 @@ def build_schema_context(
         lines.append(f"SAMPLE ROWS (first {len(sample)}):")
         lines.append(sample.to_string(index=False, max_cols=12))
 
+    # ---- Phase 3.1 Semantic Metric Layer ----
+    try:
+        import importlib.util as _ilu
+        _sl_path = _CORE_DIR / "semantic_layer.py"
+        if _sl_path.exists():
+            _sl_spec = _ilu.spec_from_file_location("_semantic_layer_nl", _sl_path)
+            _sl = _ilu.module_from_spec(_sl_spec)
+            import sys as _sys
+            _sys.modules["_semantic_layer_nl"] = _sl
+            _sl_spec.loader.exec_module(_sl)
+            _model = _sl.build_semantic_model(workspace, table_name)
+            lines.append("")
+            lines.append(_sl.model_prompt_summary(_model, max_metrics=10))
+    except Exception as _e:
+        lines.append("")
+        lines.append(f"SEMANTIC METRICS: (unavailable: {_e})")
+
     return "\n".join(lines)
 
 
@@ -129,9 +146,17 @@ RULES (strict):
 8. Keep result sets reasonable — add LIMIT 100 unless the user explicitly asks for all rows or an aggregate that returns few rows.
 9. Date/time handling: use DuckDB functions (DATE_TRUNC, strftime, etc.).
 10. For percentages, ratios, growth: calculate carefully and name the output column clearly.
+11. METRIC RULES (Semantic Layer – Phase 3.1):
+    - Prefer the exact expressions listed under SEMANTIC METRICS when the question matches.
+    - Average Order Value / AOV / any ratio → SUM(measure) / NULLIF(COUNT(DISTINCT entity), 0). NEVER AVG(measure) for AOV.
+    - Unique customers / users / orders → COUNT(DISTINCT col). NEVER COUNT(*) for "unique".
+    - NEVER SUM or AVG identifier columns (id, uuid, key, code).
+    - Ratio metrics are NON-additive: compute the ratio after aggregation, do not average a ratio.
+    - Always protect division with NULLIF(..., 0).
 
 You will receive:
 - The table schema (physical + semantic types)
+- SEMANTIC METRICS (governed definitions) when available
 - A natural language question
 
 Respond with pure SQL only.
@@ -168,6 +193,23 @@ def generate_sql(
         "",
         f"QUESTION: {question.strip()}",
     ]
+
+    # Phase 3.1 – question-specific metric resolution
+    try:
+        import importlib.util as _ilu
+        _sl_path = _CORE_DIR / "semantic_layer.py"
+        if _sl_path.exists():
+            _sl_spec = _ilu.spec_from_file_location("_semantic_layer_gen", _sl_path)
+            _sl = _ilu.module_from_spec(_sl_spec)
+            import sys as _sys
+            _sys.modules["_semantic_layer_gen"] = _sl
+            _sl_spec.loader.exec_module(_sl)
+            _model = _sl.build_semantic_model(workspace, table_name)
+            _block = _sl.metric_prompt_block(question, _model)
+            if _block:
+                user_parts.extend(["", _block])
+    except Exception:
+        pass
 
     if previous_error and previous_sql:
         user_parts.extend([
