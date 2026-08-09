@@ -4,24 +4,20 @@ AI-Powered Business Intelligence Assistant
 
 ## Status
 
-Phase 1 ✅ · Phase 2.1–2.7 ✅ (incl. production hardening) · **Phase 3.1 Semantic Metric Layer 🚧**
+Phase 1 ✅ · Phase 2.1–2.7 ✅ · **Phase 3.1 Semantic Metric Layer ✅** · **Phase 3.2 Metric Compiler ✅**
 
 ## Vision
 
 ChatGPT for company data using a free stack (Streamlit / FastAPI, DuckDB, LangGraph-style agents, Groq/Gemini, Prophet, Plotly).
 
-## Phase 3.1 – Semantic Metric Layer
+## Phase 3 (Semantic Layer)
 
-First-class governed metrics on top of the Phase-1 cleaned tables:
+Governed metrics so business numbers stay consistent.
 
-- Auto-discovered **SemanticModel** (entities, dimensions, metrics)
-- Metric kinds: SUM, COUNT, COUNT DISTINCT, AVG, MIN, MAX, **RATIO**
-- Explicit **additivity** (full / semi / non) – ratios are never naïvely averaged
-- Question → metric resolution with confidence + reason
-- NL→SQL prompt enrichment so the LLM cannot invent wrong aggregations (especially AOV)
-- Null-safe division (`NULLIF`) and ID-column exclusion
+- **3.1** – Auto-discovered SemanticModel (entities, dimensions, metrics), ratio safety, prompt enrichment
+- **3.2** – Deterministic MetricQuery → SQL compiler; preferred path for clear metric questions; NL→SQL fallback
 
-See `docs/PHASE3_PLAN.md` for the full Phase 3 roadmap.
+See `docs/PHASE3_PLAN.md`.
 
 ## Run
 
@@ -34,5 +30,5 @@ streamlit run app/frontend/app.py
 ## Tests
 
 ```bash
-pytest tests/test_semantic_layer.py -q
+pytest tests/test_semantic_layer.py tests/test_metric_compiler.py -q
 ```

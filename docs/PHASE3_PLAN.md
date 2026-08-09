@@ -1,10 +1,10 @@
 # Phase 3 – Semantic Layer & Governed Metrics
 
-**Status (2026-08-09)**  
+**Status (2026-08-10)**  
 | Sub-Phase | Focus | Status |
 |-----------|--------|--------|
-| **3.1 Semantic Metric Layer** | First-class metrics, dimensions, entities, auto-discovery, ratio safety, prompt enrichment | 🚧 In progress |
-| 3.2 Metric Compiler & Deterministic Query | Compile MetricQuery → safe SQL (grain-aware) | Planned |
+| **3.1 Semantic Metric Layer** | First-class metrics, dimensions, entities, auto-discovery, ratio safety, prompt enrichment | ✅ Done |
+| **3.2 Metric Compiler & Deterministic Query** | Compile MetricQuery → safe SQL (grain-aware) | ✅ Done |
 | 3.3 Multi-table Relationships | Entities, join paths, fan-out guards | Planned |
 | 3.4 Time Intelligence | Period-over-period, YTD, rolling windows | Planned |
 | 3.5 Metric Governance UI | Browse / override / save metric definitions | Planned |
@@ -28,56 +28,67 @@ A **Semantic Metric Layer** sits between the cleaned tables (Phase 1) and the ag
 4. **IDs are never measures** – enforced by semantic type + name heuristics.
 5. **Transparent** – every resolved metric can explain its SQL expression and reason.
 6. **Backward compatible** – existing Phase 2 agents keep working; the layer only *enriches*.
-7. **Free-stack** – pure Python + dataclasses + DuckDB; no external metric server required for 3.1.
+7. **Free-stack** – pure Python + dataclasses + DuckDB; no external metric server required.
+8. **Deterministic when possible** – compiler preferred over LLM for clear metric intents (3.2).
 
-## 3.1 Scope (this delivery)
+---
+
+## 3.1 Semantic Metric Layer ✅
+
+- `app/core/semantic_layer.py` – Entity, Dimension, Metric, SemanticModel, auto-builder, resolver, prompt blocks
+- `metrics.py` – compatibility façade
+- NL→SQL prompt enrichment with governed expressions
+- Tests: `tests/test_semantic_layer.py` (10 passed)
+
+---
+
+## 3.2 Metric Compiler & Deterministic Query ✅
 
 ### Delivered
 
-- `app/core/semantic_layer.py`
-  - `Entity`, `Dimension`, `Metric`, `SemanticModel` dataclasses
-  - Aggregation kinds: `SUM | COUNT | COUNT_DISTINCT | AVG | MIN | MAX | RATIO | EXPRESSION`
-  - Additivity: `FULL | SEMI | NON`
-  - Auto-builder from Phase-1 semantic schema + column-name heuristics
-  - Built-in business metric templates (revenue, orders, AOV, unique entities, …)
-  - Question → metric resolution with confidence and reason
-  - Prompt block generator for NL→SQL (replaces / upgrades Phase 2.7 `metrics.py` hints)
-  - Safe SQL expression helpers (`nullif`, quoted identifiers)
-  - Edge-case guards (empty table, no numeric measures, all-ID tables, high-cardinality dims)
+- `app/core/metric_compiler.py`
+  - `MetricQuery` – metrics, dimensions, filters, time grain, order, limit
+  - `compile_metric_query(model, query)` → grain-aware DuckDB SQL
+  - `try_compile_from_question(question, model)` – NL bridge when intent is clear
+  - Time grains: day / week / month / quarter / year via `DATE_TRUNC`
+  - Safe filter literals (quote-escape + strip separators/comments)
+  - NON-additive warnings when ratios are grouped
+  - High-cardinality dimension warnings
+  - Limit capping
 
 - Integration
-  - `nl_to_sql.build_schema_context` now appends a **SEMANTIC METRICS** section
-  - Stronger system-prompt rules for ratio and distinct metrics
-  - `metrics.py` remains as a thin compatibility façade
+  - `nl_to_sql.ask()` tries the deterministic compiler **first**
+  - On success → execute and return (no LLM call)
+  - On miss / failure → seamless fallback to existing NL→SQL path
 
-- Docs & tests
-  - This plan
-  - `tests/test_semantic_layer.py` covering core edge cases
+- Tests: `tests/test_metric_compiler.py` (16 passed)
 
-### Explicitly out of 3.1
-
-- Persistent user-defined metrics (YAML / UI) → 3.5
-- Multi-table joins / relationship graph → 3.3
-- Full deterministic MetricQuery compiler (still LLM for complex filters) → 3.2
-- Time intelligence (PoP, YTD) → 3.4
-
-## Edge Cases Handled in 3.1
+### Edge cases handled in 3.2
 
 | Case | Behaviour |
 |------|-----------|
-| Table with only ID columns | No SUM/AVG metrics proposed; only counts |
-| Ratio metric (AOV) | SQL always `SUM(x) / NULLIF(COUNT(DISTINCT y), 0)` |
-| User asks “average of AOV by region” | Resolver flags non-additivity; prompt warns LLM |
-| Missing value / entity columns | Metric skipped with reason |
-| High-cardinality free-text | Not promoted to dimension |
-| Currency-looking columns | Preferred as revenue measure |
-| Empty or single-row table | Model still builds; metrics marked low-confidence |
-| Conflicting column names | Prefer higher semantic confidence + name match |
+| Unknown metric name | Compile fails closed with clear error |
+| AOV by region | SQL is ratio at GROUP BY grain + NON-additive warning |
+| time_grain without time column | Warning; grain ignored |
+| Filter value with `; DROP --` | Separators/comments stripped; value stays a string literal |
+| limit=999999 | Capped to max_limit (default 5000) |
+| Ambiguous NL question | `try_compile_from_question` returns success=False → NL→SQL fallback |
+| Empty metric list | Fail closed |
 
-## Success Criteria for 3.1
+### Explicitly out of 3.2
 
-- [x] `build_semantic_model(workspace, table)` returns a populated model for any Phase-1 cleaned dataset
-- [x] `resolve_metrics_for_question` returns ranked metrics with reasons
-- [x] NL→SQL prompt contains explicit metric expressions and “never AVG a ratio” rules
-- [x] Existing Phase 2 flows continue to work without regression
-- [x] Unit tests cover ratio safety, ID exclusion, empty schema
+- Multi-table joins → 3.3
+- Period-over-period / YTD → 3.4
+- User-editable metric catalog UI → 3.5
+
+---
+
+## Success criteria progress
+
+- [x] 3.1 model builds + resolves + enriches prompts
+- [x] 3.2 compiler produces correct grain-aware SQL for known metrics
+- [x] 3.2 preferred path in `ask()` with safe fallback
+- [x] Unit tests for compiler edge cases
+- [ ] 3.3 multi-table relationships
+- [ ] 3.4 time intelligence
+- [ ] 3.5 governance UI
