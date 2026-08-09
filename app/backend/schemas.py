@@ -9,10 +9,6 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-# ---------------------------------------------------------------------------
-# Requests
-# ---------------------------------------------------------------------------
-
 class AskRequest(BaseModel):
     table_name: str = Field(..., description="Registered dataset / table name")
     question: str = Field(..., min_length=1, description="Natural language question")
@@ -38,13 +34,9 @@ class DatasetInfo(BaseModel):
     id: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Responses
-# ---------------------------------------------------------------------------
-
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.3.4"
+    version: str = "0.3.7"
     service: str = "InsightForgeAI"
 
 
@@ -68,7 +60,7 @@ class AskResponse(BaseModel):
     sql: Optional[str] = None
     insight: Optional[str] = None
     clarify_questions: List[str] = Field(default_factory=list)
-    result: Optional[List[Dict[str, Any]]] = None  # DataFrame as records
+    result: Optional[List[Dict[str, Any]]] = None
     result_columns: Optional[List[str]] = None
     result_row_count: Optional[int] = None
     forecast: Optional[List[Dict[str, Any]]] = None
