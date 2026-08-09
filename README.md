@@ -4,26 +4,19 @@ AI-Powered Business Intelligence Assistant
 
 ## Status
 
-Phase 1 ✅ · Phase 2.1–2.7 ✅ · **Phase 3.1 ✅ · 3.2 ✅ · 3.3 ✅**
+Phase 1 ✅ · Phase 2 ✅ · **Phase 3.1–3.4 ✅** · 3.5 planned
 
-## Phase 3 (Semantic Layer)
+## Phase 3
 
-- **3.1** Semantic metrics (AOV-safe, governed definitions)
-- **3.2** Deterministic metric → SQL compiler
-- **3.3** Multi-table relationship detection, join paths, fan-out guards
+- **3.1** Semantic metrics  
+- **3.2** Metric → SQL compiler  
+- **3.3** Multi-table relationships + fan-out guards  
+- **3.4** Time intelligence (YoY / MoM / YTD / rolling)
 
 See `docs/PHASE3_PLAN.md`.
-
-## Run
-
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-streamlit run app/frontend/app.py
-```
 
 ## Tests
 
 ```bash
-pytest tests/test_semantic_layer.py tests/test_metric_compiler.py tests/test_relationships.py -q
+pytest tests/test_semantic_layer.py tests/test_metric_compiler.py tests/test_relationships.py tests/test_time_intelligence.py -q
 ```
