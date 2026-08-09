@@ -275,6 +275,51 @@ def ask(
         )
         return result
 
+    # ------------------------------------------------------------------
+    # Phase 3.2 – Deterministic metric compiler (preferred when clear)
+    # ------------------------------------------------------------------
+    try:
+        import importlib.util as _ilu
+        _sl_path = _CORE_DIR / "semantic_layer.py"
+        _mc_path = _CORE_DIR / "metric_compiler.py"
+        if _sl_path.exists() and _mc_path.exists():
+            _sl_spec = _ilu.spec_from_file_location("_sl_ask", _sl_path)
+            _sl = _ilu.module_from_spec(_sl_spec)
+            import sys as _sys
+            _sys.modules["_sl_ask"] = _sl
+            _sl_spec.loader.exec_module(_sl)
+
+            _mc_spec = _ilu.spec_from_file_location("_mc_ask", _mc_path)
+            _mc = _ilu.module_from_spec(_mc_spec)
+            _sys.modules["_mc_ask"] = _mc
+            _mc_spec.loader.exec_module(_mc)
+
+            _model = _sl.build_semantic_model(workspace, table_name)
+            _compiled = _mc.try_compile_from_question(question, _model)
+            if _compiled.success and _compiled.sql:
+                df, exec_error = workspace.execute_sql(_compiled.sql)
+                if exec_error is None:
+                    result.success = True
+                    result.generated_sql = _compiled.sql
+                    result.final_sql = _compiled.sql
+                    result.result_df = df
+                    result.attempts = 0
+                    result.explanation = (
+                        f"Deterministic metric compile (Phase 3.2). {_compiled.explanation}"
+                    )
+                    if _compiled.warnings:
+                        result.warnings.extend(_compiled.warnings)
+                    if df is not None and len(df) == 0:
+                        result.warnings.append("Query executed successfully but returned 0 rows.")
+                    return result
+                else:
+                    result.warnings.append(
+                        f"Metric compiler SQL failed validation/execution ({exec_error}); "
+                        f"falling back to NL→SQL."
+                    )
+    except Exception as _e:
+        result.warnings.append(f"Metric compiler skipped: {_e}")
+
     current_sql = None
     last_error = None
 

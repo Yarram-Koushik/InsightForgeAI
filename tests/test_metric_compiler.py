@@ -53,6 +53,7 @@ def model():
 
 
 def test_compile_simple_total(model):
+    # Find a sum metric
     sum_metrics = [m.name for m in model.metrics if m.agg == AggType.SUM]
     assert sum_metrics
     q = MetricQuery(metric_names=[sum_metrics[0]])
@@ -62,7 +63,7 @@ def test_compile_simple_total(model):
     assert "SELECT" in r.sql
     assert "FROM" in r.sql
     assert "SUM(" in r.sql
-    assert "GROUP BY" not in r.sql
+    assert "GROUP BY" not in r.sql  # overall grain
 
 
 def test_compile_aov_is_ratio_not_avg(model):
@@ -153,8 +154,10 @@ def test_sql_injection_in_filter_value_stripped(model):
     r = compile_metric_query(model, q)
     assert r.success, r.error
     where_clause = r.sql.split("WHERE", 1)[-1] if "WHERE" in r.sql else r.sql
+    # Statement separators / comments must not survive inside the filter literal region
     assert ";" not in where_clause
     assert "--" not in where_clause
+    # Value must be single-quoted (string literal), not executable SQL
     assert "'West" in r.sql or "'west" in r.sql.lower()
 
 
@@ -167,9 +170,11 @@ def test_try_compile_aov_question(model):
 
 def test_try_compile_by_region(model):
     r = try_compile_from_question("total amount by region", model)
+    # Should pick a sum metric and region dimension when possible
     if r.success:
         assert "region" in r.dimensions_used or "region" in (r.sql or "").lower()
     else:
+        # Acceptable if confidence path falls back – still must not crash
         assert r.error
 
 
