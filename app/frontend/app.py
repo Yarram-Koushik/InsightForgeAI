@@ -56,6 +56,7 @@ read_file = ingestion.read_file
 nl2sql_path = project_root / "app" / "core" / "nl_to_sql.py"
 spec_nl = importlib.util.spec_from_file_location("nl_to_sql", nl2sql_path)
 nl_module = importlib.util.module_from_spec(spec_nl)
+sys.modules["nl_to_sql"] = nl_module          # CRITICAL: required for @dataclass
 spec_nl.loader.exec_module(nl_module)
 ask_nl = nl_module.ask
 # -----------------------------------------------------------
