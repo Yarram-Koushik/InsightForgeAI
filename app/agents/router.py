@@ -41,13 +41,14 @@ ROUTER_SYSTEM = """You are the intent router for InsightForgeAI, a business inte
 Classify the user question into exactly one intent:
 
 - data_query : User wants numbers, counts, lists, filters, rankings, aggregations from the table.
-- insight    : User wants explanation, trends, comparison meaning, "why", "what does this mean", summary insights.
+- insight    : User wants explanation, comparison meaning, "why", "what does this mean", summary insights (not a numeric forecast).
+- forecast   : User wants a future forecast, projection, trend over time, or anomaly detection on a time series.
 - clarify    : Question is too vague, missing key filters, or could mean multiple things. Needs clarification.
 - meta       : Question is about the system itself (capabilities, how it works, what data is loaded).
 - unsupported: Clearly cannot be answered from tabular company data (e.g. weather, news, general knowledge, coding help).
 
 Reply with ONLY this format (no markdown):
-INTENT: <one of the five>
+INTENT: <one of the six>
 REASON: <one short sentence>
 """
 
@@ -64,7 +65,11 @@ def _heuristic_intent(question: str) -> Tuple[str, str]:
     if q in ("?", "data", "report", "analysis") or (any(k in q for k in clarify_kw) and len(q.split()) <= 4):
         return "clarify", "Question is too vague to answer precisely."
 
-    insight_kw = ["why", "insight", "explain", "meaning", "trend", "compare", "summary", "what does", "interpret"]
+    forecast_kw = ["forecast", "predict", "projection", "next week", "next month", "next 30", "future", "anomaly", "anomalies", "time series", "over time"]
+    if any(k in q for k in forecast_kw):
+        return "forecast", "User is asking for forecast, trend-over-time, or anomalies."
+
+    insight_kw = ["why", "insight", "explain", "meaning", "compare", "summary", "what does", "interpret"]
     if any(k in q for k in insight_kw):
         return "insight", "User is asking for interpretation or explanation."
 
@@ -72,10 +77,7 @@ def _heuristic_intent(question: str) -> Tuple[str, str]:
 
 
 def classify(state: AgentState) -> AgentState:
-    """
-    Classify intent and write it into state.
-    Never raises – always produces a usable intent.
-    """
+    """Classify intent and write it into state. Never raises."""
     state.steps.append("router:start")
     question = (state.question or "").strip()
 
@@ -134,6 +136,8 @@ def classify(state: AgentState) -> AgentState:
         "query": Intent.DATA_QUERY,
         "insight": Intent.INSIGHT,
         "insights": Intent.INSIGHT,
+        "forecast": Intent.FORECAST,
+        "prediction": Intent.FORECAST,
         "clarify": Intent.CLARIFY,
         "clarification": Intent.CLARIFY,
         "meta": Intent.META,
