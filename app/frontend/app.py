@@ -53,18 +53,36 @@ sys.modules["orchestrator"] = orch_module
 spec_orch.loader.exec_module(orch_module)
 run_agent = orch_module.run_agent
 
+# ---------- Export / evidence (Phase 2.6) ----------
+export_path = project_root / "app" / "core" / "export.py"
+spec_export = importlib.util.spec_from_file_location("export_helpers", export_path)
+export_module = importlib.util.module_from_spec(spec_export)
+sys.modules["export_helpers"] = export_module
+spec_export.loader.exec_module(export_module)
+build_evidence_pack = export_module.build_evidence_pack
+evidence_to_json = export_module.evidence_to_json
+evidence_to_markdown = export_module.evidence_to_markdown
+dataframe_to_csv_bytes = export_module.dataframe_to_csv_bytes
+chart_to_html_bytes = export_module.chart_to_html_bytes
+chart_to_png_bytes = export_module.chart_to_png_bytes
+safe_filename_part = export_module.safe_filename_part
+
 warnings.filterwarnings("ignore", message="Could not infer format")
 st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide")
 
 st.title("InsightForgeAI")
 st.markdown("### AI-Powered Business Intelligence Assistant")
-st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.5: Forecasting & Advanced Analytics")
+st.caption("Phase 2 – Intelligent Analysis Layer | Sub-Phase 2.6: Full Chat · Evidence · Export")
 st.markdown("---")
 
 if "workspace" not in st.session_state:
     st.session_state.workspace = Workspace()
 if "excel_sheets_cache" not in st.session_state:
     st.session_state.excel_sheets_cache = {}
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "chat_dataset" not in st.session_state:
+    st.session_state.chat_dataset = None
 
 st.sidebar.title("Workspace")
 st.sidebar.markdown("Upload files. Excel files will show all sheets.")
@@ -148,22 +166,168 @@ if selected_table:
     st.markdown("---")
     st.markdown("### Ask InsightForge")
     st.caption(
-        "Multi-agent pipeline: Router → SQL → Insight → Forecast → Visualization. "
-        "Every answer shows the route taken and the SQL used."
+        "Conversational analysis with full evidence. "
+        "Router → SQL → Insight → Forecast → Visualization · Export any answer."
     )
 
+    if st.session_state.chat_dataset != selected_table:
+        st.session_state.chat_history = []
+        st.session_state.chat_dataset = selected_table
+
+    hist = st.session_state.chat_history
+
+    if hist:
+        st.markdown(f"**Conversation** · {len(hist)} turn(s)")
+        for i, turn in enumerate(hist):
+            with st.chat_message("user"):
+                st.markdown(turn.get("question") or "")
+            with st.chat_message("assistant"):
+                intent_label = (turn.get("intent") or "unknown").replace("_", " ").title()
+                st.caption(f"Route: **{intent_label}**" + (f" — {turn.get('intent_reason')}" if turn.get("intent_reason") else ""))
+
+                if turn.get("message"):
+                    if turn.get("success"):
+                        st.success(turn["message"])
+                    else:
+                        st.error(turn["message"])
+
+                if turn.get("clarify_questions"):
+                    st.markdown("**Try asking:**")
+                    for q in turn["clarify_questions"]:
+                        st.markdown(f"- {q}")
+
+                if turn.get("sql"):
+                    with st.expander("Generated SQL (evidence)", expanded=False):
+                        st.code(turn["sql"], language="sql")
+
+                if turn.get("chart_fig") is not None:
+                    chart_label = (turn.get("chart_type") or "chart").title()
+                    reason = turn.get("chart_reason") or ""
+                    st.markdown(f"**Chart · {chart_label}**")
+                    if reason:
+                        st.caption(reason)
+                    st.plotly_chart(turn["chart_fig"], width="stretch", key=f"chart_{turn.get('id', i)}")
+
+                if turn.get("forecast_df") is not None:
+                    with st.expander("Forecast values (future periods)", expanded=False):
+                        st.dataframe(turn["forecast_df"], width="stretch", hide_index=True)
+
+                if turn.get("anomalies"):
+                    with st.expander(f"Anomaly flags ({len(turn['anomalies'])})", expanded=False):
+                        st.dataframe(turn["anomalies"], width="stretch", hide_index=True)
+
+                if turn.get("result_df") is not None:
+                    with st.expander("Data table", expanded=turn.get("chart_fig") is None):
+                        st.dataframe(turn["result_df"], width="stretch", hide_index=True)
+
+                if turn.get("insight"):
+                    st.markdown("**Insight**")
+                    st.markdown(turn["insight"])
+
+                for w in turn.get("warnings") or []:
+                    st.warning(w)
+
+                if turn.get("error") and not turn.get("message"):
+                    st.error(turn["error"])
+
+                with st.expander("Agent pipeline steps", expanded=False):
+                    steps = turn.get("steps") or []
+                    if steps:
+                        st.code(" → ".join(steps))
+                    else:
+                        st.caption("No steps recorded.")
+                    if turn.get("provider"):
+                        st.caption(f"Provider: {turn.get('provider')} · Model: {turn.get('model') or '—'}")
+
+                with st.expander("Export this answer", expanded=False):
+                    stamp = safe_filename_part(turn.get("id") or str(i))
+                    qpart = safe_filename_part(turn.get("question") or "answer")
+                    c1, c2, c3 = st.columns(3)
+
+                    if turn.get("result_df") is not None:
+                        payload = dataframe_to_csv_bytes(turn["result_df"])
+                        if payload.data:
+                            c1.download_button(
+                                "⬇ Result CSV",
+                                data=payload.data,
+                                file_name=f"result_{qpart}_{stamp}.csv",
+                                mime=payload.mime,
+                                key=f"csv_result_{i}",
+                            )
+                            if payload.note:
+                                st.caption(payload.note)
+
+                    if turn.get("forecast_df") is not None:
+                        payload = dataframe_to_csv_bytes(turn["forecast_df"])
+                        if payload.data:
+                            c2.download_button(
+                                "⬇ Forecast CSV",
+                                data=payload.data,
+                                file_name=f"forecast_{qpart}_{stamp}.csv",
+                                mime=payload.mime,
+                                key=f"csv_fc_{i}",
+                            )
+
+                    pack = turn.get("evidence")
+                    if pack:
+                        c3.download_button(
+                            "⬇ Evidence JSON",
+                            data=evidence_to_json(pack),
+                            file_name=f"evidence_{qpart}_{stamp}.json",
+                            mime="application/json",
+                            key=f"ev_json_{i}",
+                        )
+                        st.download_button(
+                            "⬇ Evidence Markdown",
+                            data=evidence_to_markdown(pack),
+                            file_name=f"evidence_{qpart}_{stamp}.md",
+                            mime="text/markdown",
+                            key=f"ev_md_{i}",
+                        )
+
+                    if turn.get("chart_fig") is not None:
+                        html_payload = chart_to_html_bytes(turn["chart_fig"], title=qpart)
+                        if html_payload and html_payload.data:
+                            st.download_button(
+                                "⬇ Chart HTML",
+                                data=html_payload.data,
+                                file_name=html_payload.filename,
+                                mime=html_payload.mime,
+                                key=f"chart_html_{i}",
+                            )
+                        png_payload = chart_to_png_bytes(turn["chart_fig"], title=qpart)
+                        if png_payload and png_payload.data:
+                            st.download_button(
+                                "⬇ Chart PNG",
+                                data=png_payload.data,
+                                file_name=png_payload.filename,
+                                mime=png_payload.mime,
+                                key=f"chart_png_{i}",
+                            )
+                        else:
+                            st.caption("PNG export needs `pip install kaleido` (optional). HTML always works.")
+    else:
+        st.info("Ask a question below to start the conversation. Answers stay in this session with full evidence.")
+
     with st.container(border=True):
-        nl_question = st.text_input(
-            "Your question",
-            placeholder="e.g. How many per Branch?  |  Forecast next 30 days  |  Why are counts different?",
-            key="nl_question",
-            label_visibility="collapsed",
-        )
-        col_ask, col_status = st.columns([1, 4])
-        with col_ask:
+        col_in, col_btn, col_clear = st.columns([6, 1, 1])
+        with col_in:
+            nl_question = st.text_input(
+                "Your question",
+                placeholder="e.g. How many per Branch?  |  Forecast next 30 days  |  Why are counts different?",
+                key="nl_question",
+                label_visibility="collapsed",
+            )
+        with col_btn:
             ask_clicked = st.button("Ask", type="primary", use_container_width=True)
-        with col_status:
-            st.caption("Agents: Router · SQL · Insight · Forecast · Viz · Clarify  |  Keys in .env")
+        with col_clear:
+            clear_clicked = st.button("Clear", use_container_width=True)
+
+        st.caption("Agents: Router · SQL · Insight · Forecast · Viz · Clarify  |  Keys in .env")
+
+        if clear_clicked:
+            st.session_state.chat_history = []
+            st.rerun()
 
         if ask_clicked and nl_question.strip():
             with st.spinner("Agents working..."):
@@ -173,64 +337,40 @@ if selected_table:
                     question=nl_question.strip(),
                 )
 
-            intent_label = (agent_result.intent or "unknown").replace("_", " ").title()
-            st.caption(f"Route: **{intent_label}**" + (f" — {agent_result.intent_reason}" if agent_result.intent_reason else ""))
-
-            if agent_result.message:
-                if agent_result.success:
-                    st.success(agent_result.message)
-                else:
-                    st.error(agent_result.message)
-
-            if agent_result.clarify_questions:
-                st.markdown("**Try asking:**")
-                for q in agent_result.clarify_questions:
-                    st.markdown(f"- {q}")
-
-            if agent_result.sql:
-                with st.expander("Generated SQL (evidence)", expanded=False):
-                    st.code(agent_result.sql, language="sql")
-
-            if agent_result.success and getattr(agent_result, "chart_fig", None) is not None:
-                chart_label = (agent_result.chart_type or "chart").title()
-                reason = agent_result.chart_reason or ""
-                st.markdown(f"#### Chart · {chart_label}")
-                if reason:
-                    st.caption(reason)
-                st.plotly_chart(agent_result.chart_fig, width="stretch")
-
-            fdf = getattr(agent_result, "forecast_df", None)
-            if fdf is not None and agent_result.success:
-                with st.expander("Forecast values (future periods)", expanded=False):
-                    st.dataframe(fdf, width="stretch", hide_index=True)
-
-            anoms = getattr(agent_result, "anomalies", None) or []
-            if anoms:
-                with st.expander(f"Anomaly flags ({len(anoms)})", expanded=False):
-                    st.dataframe(anoms, width="stretch", hide_index=True)
-
-            if agent_result.result_df is not None and agent_result.success:
-                with st.expander("Data table", expanded=getattr(agent_result, "chart_fig", None) is None):
-                    st.dataframe(agent_result.result_df, width="stretch", hide_index=True)
-
-            if agent_result.insight:
-                st.markdown("#### Insight")
-                st.markdown(agent_result.insight)
-
-            if agent_result.warnings:
-                for w in agent_result.warnings:
-                    st.warning(w)
-
-            if agent_result.error and not agent_result.message:
-                st.error(agent_result.error)
-
-            with st.expander("Agent pipeline steps", expanded=False):
-                if agent_result.steps:
-                    st.code(" → ".join(agent_result.steps))
-                else:
-                    st.caption("No steps recorded.")
-                if agent_result.provider:
-                    st.caption(f"Provider: {agent_result.provider} · Model: {agent_result.model or '—'}")
+            import uuid
+            pack = build_evidence_pack(
+                question=nl_question.strip(),
+                table_name=selected_table,
+                agent_result=agent_result,
+                source_filename=getattr(record, "source_filename", None),
+            )
+            turn = {
+                "id": str(uuid.uuid4())[:8],
+                "question": nl_question.strip(),
+                "success": bool(agent_result.success),
+                "intent": agent_result.intent,
+                "intent_reason": agent_result.intent_reason,
+                "message": agent_result.message,
+                "sql": agent_result.sql,
+                "insight": agent_result.insight,
+                "clarify_questions": list(agent_result.clarify_questions or []),
+                "result_df": agent_result.result_df,
+                "forecast_df": getattr(agent_result, "forecast_df", None),
+                "anomalies": list(getattr(agent_result, "anomalies", []) or []),
+                "chart_fig": getattr(agent_result, "chart_fig", None),
+                "chart_type": getattr(agent_result, "chart_type", None),
+                "chart_reason": getattr(agent_result, "chart_reason", None),
+                "steps": list(agent_result.steps or []),
+                "warnings": list(agent_result.warnings or []),
+                "error": agent_result.error,
+                "provider": agent_result.provider,
+                "model": agent_result.model,
+                "evidence": pack,
+            }
+            st.session_state.chat_history.append(turn)
+            if len(st.session_state.chat_history) > 30:
+                st.session_state.chat_history = st.session_state.chat_history[-30:]
+            st.rerun()
 
     st.markdown("---")
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Schema", "Cleaning & Lineage", "Data Profile", "Data Preview", "SQL Query"])
