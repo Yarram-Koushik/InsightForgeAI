@@ -72,6 +72,7 @@ def test_detect_orders_customers_link():
 def test_cardinality_many_to_one_preferred():
     ws = _sample_workspace()
     g = detect_relationships(ws)
+    # Should orient as orders (N) → customers (1)
     found = False
     for r in g.relationships:
         if r.left_table == "orders" and r.right_table == "customers":
@@ -82,6 +83,7 @@ def test_cardinality_many_to_one_preferred():
             )
             found = True
         if r.left_table == "customers" and r.right_table == "orders":
+            # If oriented this way, expect 1:N
             assert r.cardinality in (
                 Cardinality.ONE_TO_MANY,
                 Cardinality.UNKNOWN,
@@ -127,6 +129,7 @@ def test_compile_join_sql():
 def test_fan_out_blocked_when_requested():
     ws = _sample_workspace()
     g = detect_relationships(ws)
+    # customers → orders is 1:N (fan-out if aggregating on customers grain)
     path = find_join_path(g, "customers", "orders")
     if path is None:
         pytest.skip("path not found")
@@ -159,6 +162,7 @@ def test_no_false_link_on_unrelated():
         }
     )
     g = detect_relationships(ws, min_confidence=0.55)
+    # Unrelated schemas should yield zero or very low-confidence links
     assert len(g.relationships) == 0
 
 

@@ -129,6 +129,23 @@ def build_schema_context(
         lines.append("")
         lines.append(f"SEMANTIC METRICS: (unavailable: {_e})")
 
+    # ---- Phase 3.3 Multi-table Relationships ----
+    try:
+        import importlib.util as _ilu
+        _rel_path = _CORE_DIR / "relationships.py"
+        if _rel_path.exists() and len(workspace.list_datasets()) >= 2:
+            _rel_spec = _ilu.spec_from_file_location("_rel_nl", _rel_path)
+            _rel = _ilu.module_from_spec(_rel_spec)
+            import sys as _sys
+            _sys.modules["_rel_nl"] = _rel
+            _rel_spec.loader.exec_module(_rel)
+            _graph = _rel.build_workspace_relationship_graph(workspace)
+            lines.append("")
+            lines.append(_rel.relationships_prompt_block(_graph, primary_table=table_name))
+    except Exception as _e:
+        lines.append("")
+        lines.append(f"RELATIONSHIPS: (unavailable: {_e})")
+
     return "\n".join(lines)
 
 
@@ -153,10 +170,16 @@ RULES (strict):
     - NEVER SUM or AVG identifier columns (id, uuid, key, code).
     - Ratio metrics are NON-additive: compute the ratio after aggregation, do not average a ratio.
     - Always protect division with NULLIF(..., 0).
+12. JOIN RULES (Phase 3.3):
+    - Only JOIN tables using relationships listed under RELATIONSHIPS.
+    - Always write explicit ON conditions; never Cartesian products.
+    - Prefer fact→dimension (MANY_TO_ONE). Avoid 1:N joins when aggregating (fan-out doubles metrics).
+    - If a question needs another table and no relationship exists, answer from the primary table only or return UNSUPPORTED.
 
 You will receive:
 - The table schema (physical + semantic types)
 - SEMANTIC METRICS (governed definitions) when available
+- RELATIONSHIPS between loaded tables when available
 - A natural language question
 
 Respond with pure SQL only.
