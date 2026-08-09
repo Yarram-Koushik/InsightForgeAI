@@ -1,0 +1,147 @@
+"""
+Router Agent – classifies user intent before any heavy work.
+Uses the shared LLM client. Falls back to DATA_QUERY on any failure
+so the system never blocks the user.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from typing import Tuple
+
+_AGENTS_DIR = Path(__file__).resolve().parent
+_CORE_DIR = _AGENTS_DIR.parent / "core"
+_ROOT = _AGENTS_DIR.parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import importlib.util
+
+def _load(name: str, path: Path):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+_state = _load("agent_state", _AGENTS_DIR / "state.py")
+Intent = _state.Intent
+AgentState = _state.AgentState
+
+_llm = _load("llm_client", _CORE_DIR / "llm_client.py")
+get_llm_client = _llm.get_llm_client
+
+
+ROUTER_SYSTEM = """You are the intent router for InsightForgeAI, a business intelligence product.
+
+Classify the user question into exactly one intent:
+
+- data_query : User wants numbers, counts, lists, filters, rankings, aggregations from the table.
+- insight    : User wants explanation, trends, comparison meaning, "why", "what does this mean", summary insights.
+- clarify    : Question is too vague, missing key filters, or could mean multiple things. Needs clarification.
+- meta       : Question is about the system itself (capabilities, how it works, what data is loaded).
+- unsupported: Clearly cannot be answered from tabular company data (e.g. weather, news, general knowledge, coding help).
+
+Reply with ONLY this format (no markdown):
+INTENT: <one of the five>
+REASON: <one short sentence>
+"""
+
+
+def _heuristic_intent(question: str) -> Tuple[str, str]:
+    """Fast local fallback when LLM is unavailable."""
+    q = question.lower().strip()
+
+    meta_kw = ["what can you", "how do you", "who are you", "help", "capabilities", "what data"]
+    if any(k in q for k in meta_kw) and len(q) < 80:
+        return "meta", "Question appears to be about the system."
+
+    clarify_kw = ["something", "stuff", "anything", "performance", "analyse this", "analyze this", "tell me about"]
+    if q in ("?", "data", "report", "analysis") or (any(k in q for k in clarify_kw) and len(q.split()) <= 4):
+        return "clarify", "Question is too vague to answer precisely."
+
+    insight_kw = ["why", "insight", "explain", "meaning", "trend", "compare", "summary", "what does", "interpret"]
+    if any(k in q for k in insight_kw):
+        return "insight", "User is asking for interpretation or explanation."
+
+    return "data_query", "Default: treat as a data retrieval question."
+
+
+def classify(state: AgentState) -> AgentState:
+    """
+    Classify intent and write it into state.
+    Never raises – always produces a usable intent.
+    """
+    state.steps.append("router:start")
+    question = (state.question or "").strip()
+
+    if not question:
+        state.intent = Intent.CLARIFY
+        state.intent_reason = "Empty question."
+        state.steps.append("router:empty")
+        return state
+
+    client = get_llm_client()
+    if not client.is_configured():
+        intent_str, reason = _heuristic_intent(question)
+        state.intent = Intent(intent_str)
+        state.intent_reason = reason + " (heuristic – no API key)"
+        state.warnings.append("Router used local heuristics because no LLM API key is configured.")
+        state.steps.append(f"router:heuristic:{intent_str}")
+        return state
+
+    schema_hint = ""
+    try:
+        if state.workspace and state.table_name:
+            schema_df = state.workspace.get_table_schema(state.table_name)
+            if schema_df is not None and "column_name" in schema_df.columns:
+                cols = ", ".join(schema_df["column_name"].astype(str).tolist()[:20])
+                schema_hint = f"\nAvailable columns in current table: {cols}"
+    except Exception:
+        pass
+
+    user_prompt = f"QUESTION: {question}{schema_hint}"
+
+    resp = client.chat(
+        system_prompt=ROUTER_SYSTEM,
+        user_prompt=user_prompt,
+        temperature=0.0,
+        max_tokens=120,
+    )
+
+    if not resp.success:
+        intent_str, reason = _heuristic_intent(question)
+        state.intent = Intent(intent_str)
+        state.intent_reason = reason + f" (LLM router failed: {resp.error})"
+        state.warnings.append("Router fell back to heuristics after LLM error.")
+        state.steps.append(f"router:fallback:{intent_str}")
+        return state
+
+    text = (resp.content or "").strip()
+    intent_match = re.search(r"INTENT:\s*(\w+)", text, re.IGNORECASE)
+    reason_match = re.search(r"REASON:\s*(.+)", text, re.IGNORECASE)
+
+    raw_intent = (intent_match.group(1).lower() if intent_match else "data_query").strip()
+    reason = reason_match.group(1).strip() if reason_match else "Classified by router."
+
+    mapping = {
+        "data_query": Intent.DATA_QUERY,
+        "data": Intent.DATA_QUERY,
+        "query": Intent.DATA_QUERY,
+        "insight": Intent.INSIGHT,
+        "insights": Intent.INSIGHT,
+        "clarify": Intent.CLARIFY,
+        "clarification": Intent.CLARIFY,
+        "meta": Intent.META,
+        "unsupported": Intent.UNSUPPORTED,
+    }
+    state.intent = mapping.get(raw_intent, Intent.DATA_QUERY)
+    state.intent_reason = reason
+    state.provider = resp.provider
+    state.model = resp.model
+    state.steps.append(f"router:done:{state.intent.value}")
+    return state
