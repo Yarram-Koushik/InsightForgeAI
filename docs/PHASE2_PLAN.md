@@ -2,21 +2,16 @@
 
 | Sub-Phase | Status |
 |-----------|--------|
-| 2.1 DuckDB Query Engine | ✅ |
-| 2.2 Natural Language → SQL | ✅ |
-| 2.3 Multi-Agent Orchestration | ✅ |
-| 2.4 Automated Visualizations | ✅ |
-| 2.5 Forecasting & Advanced Analytics | ✅ |
-| 2.6 Full Chat + Evidence + Export | ✅ |
+| 2.1–2.6 | ✅ |
+| **2.7 Production Hardening Sprint** | ✅ |
 
-## 2.6 Full Chat + Evidence + Export
+## 2.7 gaps closed
 
-- Session chat history with `st.chat_message`
-- Evidence packs: question, route, SQL, steps, model, shape
-- Downloads: result CSV, forecast CSV, evidence JSON/MD, chart HTML (+ PNG if kaleido)
-- Dataset switch clears chat; history capped at 30 turns
-- `app/core/export.py`
-
-## Phase 2 complete
-
-Next product phases (outside Phase 2 plan): multi-dataset joins, auth, deployment hardening.
+- `sql_guard.py` – expanded blocklist, multi-statement reject, schema table check, sample sanitization
+- `metrics.py` – COUNT/SUM/AVG/DISTINCT/AOV prompt hints
+- `result_sanity.py` – negative/extreme/shape warnings
+- `analytics.py` – metric series aggregation, gap notes, horizon validation, backtest MAE/RMSE/MAPE, robust anomalies
+- `context_memory.py` – follow-up question expansion
+- `eval_harness.py` – golden-case skeleton
+- Correlation includes causation disclaimer
+- Charts skip `*_id` as measures
