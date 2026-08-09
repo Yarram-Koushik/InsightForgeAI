@@ -17,6 +17,7 @@ class Intent(str, Enum):
     CLARIFY = "clarify"             # question too vague / missing context
     META = "meta"                   # about the system itself
     UNSUPPORTED = "unsupported"     # cannot be answered from current data
+    FORECAST = "forecast"           # time-series forecast / trend / anomaly
 
 
 @dataclass
@@ -46,6 +47,16 @@ class AgentState:
     chart_type: Optional[str] = None
     chart_reason: Optional[str] = None
 
+    # Forecast stage (Phase 2.5)
+    forecast_success: bool = False
+    forecast_df: Optional[pd.DataFrame] = None
+    forecast_fig: Any = None
+    forecast_method: Optional[str] = None
+    forecast_horizon: Optional[int] = None
+    forecast_error: Optional[str] = None
+    trend_summary: Optional[str] = None
+    anomalies: List[Any] = field(default_factory=list)
+
     # Clarify stage
     clarify_questions: List[str] = field(default_factory=list)
 
@@ -74,13 +85,20 @@ class AgentResult:
     chart_type: Optional[str] = None
     chart_reason: Optional[str] = None
 
+    # Forecast (Phase 2.5)
+    forecast_df: Optional[pd.DataFrame] = None
+    forecast_method: Optional[str] = None
+    forecast_horizon: Optional[int] = None
+    trend_summary: Optional[str] = None
+    anomalies: List[Any] = field(default_factory=list)
+
     # Meta
     steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
-    message: Optional[str] = None   # human-readable summary for UI
+    message: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {

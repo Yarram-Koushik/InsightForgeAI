@@ -9,3 +9,4 @@ pyarrow
 groq
 google-generativeai
 plotly
+# optional for richer seasonality: prophet
