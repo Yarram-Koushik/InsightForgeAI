@@ -231,6 +231,16 @@ def generate_sql(
             _block = _sl.metric_prompt_block(question, _model)
             if _block:
                 user_parts.extend(["", _block])
+            # Phase 3.4 time-intelligence hints
+            _ti_path = _CORE_DIR / "time_intelligence.py"
+            if _ti_path.exists():
+                _ti_spec = _ilu.spec_from_file_location("_ti_gen", _ti_path)
+                _ti = _ilu.module_from_spec(_ti_spec)
+                _sys.modules["_ti_gen"] = _ti
+                _ti_spec.loader.exec_module(_ti)
+                _tib = _ti.time_intel_prompt_block(question, _model)
+                if _tib:
+                    user_parts.extend(["", _tib])
     except Exception:
         pass
 
@@ -342,6 +352,50 @@ def ask(
                     )
     except Exception as _e:
         result.warnings.append(f"Metric compiler skipped: {_e}")
+
+    # ------------------------------------------------------------------
+    # Phase 3.4 – Time intelligence (PoP / YoY / YTD / rolling)
+    # ------------------------------------------------------------------
+    try:
+        import importlib.util as _ilu
+        _sl_path = _CORE_DIR / "semantic_layer.py"
+        _ti_path = _CORE_DIR / "time_intelligence.py"
+        if _sl_path.exists() and _ti_path.exists():
+            _sl_spec = _ilu.spec_from_file_location("_sl_ti", _sl_path)
+            _sl = _ilu.module_from_spec(_sl_spec)
+            import sys as _sys
+            _sys.modules["_sl_ti"] = _sl
+            _sl_spec.loader.exec_module(_sl)
+
+            _ti_spec = _ilu.spec_from_file_location("_ti_ask", _ti_path)
+            _ti = _ilu.module_from_spec(_ti_spec)
+            _sys.modules["_ti_ask"] = _ti
+            _ti_spec.loader.exec_module(_ti)
+
+            _model = _sl.build_semantic_model(workspace, table_name)
+            _ti_res = _ti.try_compile_time_intel_from_question(question, _model, table_name)
+            if _ti_res.success and _ti_res.sql:
+                df, exec_error = workspace.execute_sql(_ti_res.sql)
+                if exec_error is None:
+                    result.success = True
+                    result.generated_sql = _ti_res.sql
+                    result.final_sql = _ti_res.sql
+                    result.result_df = df
+                    result.attempts = 0
+                    result.explanation = (
+                        f"Time intelligence (Phase 3.4). {_ti_res.explanation}"
+                    )
+                    if _ti_res.warnings:
+                        result.warnings.extend(_ti_res.warnings)
+                    if df is not None and len(df) == 0:
+                        result.warnings.append("Query executed successfully but returned 0 rows.")
+                    return result
+                else:
+                    result.warnings.append(
+                        f"Time-intel SQL failed ({exec_error}); falling back to NL→SQL."
+                    )
+    except Exception as _e:
+        result.warnings.append(f"Time intelligence skipped: {_e}")
 
     current_sql = None
     last_error = None

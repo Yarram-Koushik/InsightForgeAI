@@ -146,6 +146,7 @@ def test_try_from_question(model):
         model,
         "orders",
     )
+    # Should succeed when time col + metric exist
     assert r.success, r.error
     assert r.sql is not None
     assert "growth_pct" in r.sql
