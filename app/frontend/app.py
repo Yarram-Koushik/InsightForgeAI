@@ -40,6 +40,69 @@ spec_prof.loader.exec_module(profiling_module)
 generate_quality_report = profiling_module.generate_quality_report
 column_level_profile = profiling_module.column_level_profile
 Workspace = dm_module.Workspace
+
+def _get_durable_store():
+    """Lazy-load Phase 3.3 workspace store (one per Streamlit session)."""
+    if st.session_state.get("_durable_store") is not None:
+        return st.session_state["_durable_store"]
+    try:
+        import os
+        ws_path = project_root / "app" / "core" / "workspace_store.py"
+        if not ws_path.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("workspace_store_ui", ws_path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["workspace_store_ui"] = mod
+        spec.loader.exec_module(mod)
+        wid = os.getenv("INSIGHTFORGE_WORKSPACE_ID", "default")
+        store = mod.get_or_create_store(wid)
+        st.session_state["_durable_store"] = store
+        return store
+    except Exception as e:
+        st.session_state["_durable_store_error"] = str(e)
+        return None
+
+
+def _persist_dataset(record_name: str) -> None:
+    """Save a loaded dataset to disk so F5 restore works."""
+    try:
+        store = _get_durable_store()
+        if store is None:
+            return
+        rec = st.session_state.workspace.get(record_name)
+        if rec is not None:
+            store.save_dataset(rec, include_raw=False)
+    except Exception:
+        pass
+
+
+def _persist_chat_turn(turn: dict, table_name: str) -> None:
+    """Append a chat turn (no heavy dataframes) to durable history."""
+    try:
+        store = _get_durable_store()
+        if store is None:
+            return
+        payload = {
+            "id": turn.get("id"),
+            "question": turn.get("question"),
+            "success": turn.get("success"),
+            "intent": turn.get("intent"),
+            "intent_reason": turn.get("intent_reason"),
+            "message": turn.get("message"),
+            "sql": turn.get("sql"),
+            "insight": turn.get("insight"),
+            "clarify_questions": turn.get("clarify_questions") or [],
+            "warnings": turn.get("warnings") or [],
+            "error": turn.get("error"),
+            "provider": turn.get("provider"),
+            "model": turn.get("model"),
+            "steps": turn.get("steps") or [],
+            "table_name": table_name,
+        }
+        store.append_chat_turn(payload)
+    except Exception:
+        pass
+
 DatasetRecord = dm_module.DatasetRecord
 apply_safe_cleaning = cleaning_module.apply_safe_cleaning
 make_safe_table_name = ingestion.make_safe_table_name
@@ -71,7 +134,7 @@ st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide")
 
 st.title("InsightForgeAI")
 st.markdown("### AI-Powered Business Intelligence Assistant")
-st.caption("Phase 3 – Semantic Layer & Governed Metrics | 3.5 Metric Governance UI")
+st.caption("Phase 3 – Semantic Layer · Governed Metrics · Durable workspace (survives F5)")
 st.markdown("---")
 
 if "workspace" not in st.session_state:
@@ -82,6 +145,56 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_dataset" not in st.session_state:
     st.session_state.chat_dataset = None
+if "_ws_restored" not in st.session_state:
+    st.session_state["_ws_restored"] = False
+
+# Phase 3.3 – restore datasets (+ lightweight chat) once per browser session
+if not st.session_state.get("_ws_restored"):
+    store = _get_durable_store()
+    if store is not None:
+        try:
+            info = store.load_into(st.session_state.workspace)
+            restored = list((info or {}).get("restored") or [])
+            if restored:
+                st.session_state["_restored_names"] = restored
+            try:
+                turns = store.load_chat_history(limit=20)
+                if turns and not st.session_state.chat_history:
+                    light = []
+                    for t in turns:
+                        d = t.to_dict() if hasattr(t, "to_dict") else dict(t)
+                        light.append({
+                            "id": d.get("id"),
+                            "question": d.get("question"),
+                            "success": d.get("success", True),
+                            "intent": d.get("intent"),
+                            "intent_reason": d.get("intent_reason"),
+                            "message": d.get("message"),
+                            "sql": d.get("sql"),
+                            "insight": d.get("insight"),
+                            "clarify_questions": d.get("clarify_questions") or [],
+                            "result_df": None,
+                            "forecast_df": None,
+                            "anomalies": [],
+                            "chart_fig": None,
+                            "chart_type": None,
+                            "chart_reason": None,
+                            "steps": d.get("steps") or [],
+                            "warnings": d.get("warnings") or [],
+                            "error": d.get("error"),
+                            "provider": d.get("provider"),
+                            "model": d.get("model"),
+                            "evidence": None,
+                            "_restored": True,
+                        })
+                        if d.get("table_name") and not st.session_state.chat_dataset:
+                            st.session_state.chat_dataset = d.get("table_name")
+                    st.session_state.chat_history = light
+            except Exception:
+                pass
+        except Exception as e:
+            st.session_state["_durable_restore_error"] = str(e)
+    st.session_state["_ws_restored"] = True
 
 st.sidebar.title("Workspace")
 st.sidebar.markdown("Upload files. Excel files will show all sheets.")
@@ -126,7 +239,8 @@ if uploaded_files:
                             record = st.session_state.workspace.get(final_name)
                             record.apply_cleaning(cleaned_df, issues, change_log)
                             st.session_state.workspace.register_in_duckdb(final_name)
-                            st.sidebar.success(f"Loaded: {final_name}")
+                            _persist_dataset(final_name)
+                            st.sidebar.success(f"Loaded: {final_name} (saved)")
                         except Exception as e:
                             st.sidebar.error(f"Failed to load sheet: {e}")
         else:
@@ -142,16 +256,22 @@ if uploaded_files:
                     record = st.session_state.workspace.get(final_name)
                     record.apply_cleaning(cleaned_df, issues, change_log)
                     st.session_state.workspace.register_in_duckdb(final_name)
-                    st.sidebar.success(f"Loaded: {final_name}")
+                    _persist_dataset(final_name)
+                    st.sidebar.success(f"Loaded: {final_name} (saved)")
                 except Exception as e:
                     st.sidebar.error(f"Error: {e}")
 
 dataset_names = st.session_state.workspace.list_datasets()
+if st.session_state.get("_restored_names"):
+    st.sidebar.success(
+        "Restored from disk: " + ", ".join(st.session_state["_restored_names"])
+    )
+    st.session_state["_restored_names"] = None
 if dataset_names:
     selected_table = st.sidebar.selectbox("Select Dataset", options=dataset_names, key="sidebar_select_dataset")
 else:
     selected_table = None
-    st.sidebar.info("No datasets loaded yet.")
+    st.sidebar.info("No datasets loaded yet. Upload a file — it will survive F5.")
 
 if selected_table:
     record = st.session_state.workspace.get(selected_table)
@@ -170,7 +290,9 @@ if selected_table:
     st.caption("Conversational analysis with full evidence. Router → SQL → Insight → Forecast → Visualization · Export any answer.")
 
     if st.session_state.chat_dataset != selected_table:
-        st.session_state.chat_history = []
+        # Keep history if it was restored for this table; otherwise clear when switching
+        if not any(t.get("_restored") for t in (st.session_state.chat_history or [])):
+            st.session_state.chat_history = []
         st.session_state.chat_dataset = selected_table
 
     hist = st.session_state.chat_history
@@ -257,7 +379,7 @@ if selected_table:
     with st.container(border=True):
         col_in, col_btn, col_clear = st.columns([6, 1, 1])
         with col_in:
-            nl_question = st.text_input("Your question", placeholder="e.g. How many per Branch?  |  Forecast next 30 days  |  Why are counts different?", key="nl_question", label_visibility="collapsed")
+            nl_question = st.text_input("Your question", placeholder="e.g. How many per Branch?  |  Forecast next 30 days", key="nl_question", label_visibility="collapsed")
         with col_btn:
             ask_clicked = st.button("Ask", type="primary", use_container_width=True)
         with col_clear:
@@ -295,6 +417,7 @@ if selected_table:
                 "evidence": pack,
             }
             st.session_state.chat_history.append(turn)
+            _persist_chat_turn(turn, selected_table)
             if len(st.session_state.chat_history) > 30:
                 st.session_state.chat_history = st.session_state.chat_history[-30:]
             st.rerun()
@@ -346,7 +469,7 @@ if selected_table:
             st.markdown("**Available tables (use these exact names):**")
             for t in available_tables:
                 st.code(t, language=None)
-            st.info("Table names come from the file + sheet (e.g. `phase3_test_orders`). Do **not** use plain `orders` unless that is the registered name.")
+            st.info("Use exact table names (e.g. phase3_test_orders), not plain 'orders'.")
             selected_for_schema = st.selectbox("Inspect table schema", options=available_tables, key="schema_inspect")
             if selected_for_schema:
                 st.dataframe(st.session_state.workspace.get_table_schema(selected_for_schema), width="stretch", hide_index=True)
@@ -365,7 +488,7 @@ if selected_table:
     with tab6:
         st.markdown("#### Metric Governance (Phase 3.5)")
         st.caption(f"Active dataset: `{selected_table}`")
-        st.caption("Browse auto-discovered metrics, override definitions, disable unwanted ones, or add custom metrics.")
+        st.caption("Browse metrics, override definitions, disable or add custom metrics.")
         try:
             import importlib.util as _ilu
             _gov_path = project_root / "app" / "core" / "metric_governance.py"
@@ -425,4 +548,4 @@ if selected_table:
             st.error(f"Could not load metric governance UI: {e}")
             st.exception(e)
 else:
-    st.info("Upload files from the sidebar to get started.")
+    st.info("Upload files from the sidebar to get started. After load, data is saved under data/workspaces/ and survives F5.")
