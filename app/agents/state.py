@@ -3,6 +3,7 @@ Shared state and result types for the multi-agent pipeline.
 All dataclasses are plain so they work under importlib loading.
 
 Phase 4.2: citations + grounding_line for trust / multi-turn evidence.
+Phase 4.3: eda_pack, extra_charts, root_cause, whatif, rfm artifacts.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ class AgentState:
     question: str
     table_name: str
     workspace: Any = None
+
+    # Optional multi-turn context (injected by UI for context_memory)
+    chat_history: Optional[List[Dict[str, Any]]] = None
+    history: Optional[List[Dict[str, Any]]] = None
+    raw_question: Optional[str] = None
 
     intent: Optional[Intent] = None
     intent_reason: Optional[str] = None
@@ -66,6 +72,13 @@ class AgentState:
     citations: List[Dict[str, Any]] = field(default_factory=list)
     grounding_line: Optional[str] = None
 
+    # Phase 4.3 – specialized analytics artifacts
+    extra_charts: List[Dict[str, Any]] = field(default_factory=list)  # [{title, fig, reason}, ...]
+    eda_pack: Any = None
+    root_cause: Any = None
+    whatif: Any = None
+    rfm: Any = None
+
     # Pipeline bookkeeping
     steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -102,6 +115,10 @@ class AgentResult:
     citations: List[Dict[str, Any]] = field(default_factory=list)
     grounding_line: Optional[str] = None
 
+    # Phase 4.3 – analytics extras
+    extra_charts: List[Dict[str, Any]] = field(default_factory=list)
+    eda_pack: Any = None
+
     # Meta
     steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -122,4 +139,5 @@ class AgentResult:
             "warnings": self.warnings,
             "grounding_line": self.grounding_line,
             "citations": self.citations,
+            "extra_chart_titles": [c.get("title") for c in (self.extra_charts or [])],
         }
