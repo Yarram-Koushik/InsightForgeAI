@@ -85,7 +85,6 @@ def _schema_context(workspace, table_name: str) -> str:
         lines.append(f"(schema detect failed: {e})")
         for c in df.columns:
             lines.append(f'  - "{c}"')
-    # Relationships + metrics context added by callers when available
     try:
         _rel_path = _CORE_DIR / "relationships.py"
         if _rel_path.exists() and len(workspace.list_datasets()) >= 2:
@@ -179,7 +178,9 @@ def generate_sql(workspace, table_name: str, question: str, previous_error: str 
             user_parts.append(f"Previous SQL:\n{previous_sql}")
         user_parts.append("Fix the SQL. Output only the corrected SELECT.")
     user_prompt = "\n".join(user_parts)
-    resp = client.chat(system=SYSTEM_PROMPT, user=user_prompt)
+    resp = client.chat(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
+    if not getattr(resp, "success", True):
+        return "", resp
     sql = _clean_sql(resp.content or "")
     return sql, resp
 
@@ -266,12 +267,17 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
             previous_error=last_error,
             previous_sql=current_sql,
         )
-        result.provider = llm_resp.provider
-        result.model = llm_resp.model
+        result.provider = getattr(llm_resp, "provider", None)
+        result.model = getattr(llm_resp, "model", None)
+        if not getattr(llm_resp, "success", True) and getattr(llm_resp, "error", None):
+            result.error = llm_resp.error
+            # Don't retry forever on missing API key
+            if "API key" in str(llm_resp.error) or "No LLM" in str(llm_resp.error):
+                return result
         current_sql = sql
         result.generated_sql = sql
         if not sql or not sql.lower().lstrip().startswith(("select", "with")):
-            last_error = "Model did not return a SELECT/WITH statement"
+            last_error = getattr(llm_resp, "error", None) or "Model did not return a SELECT/WITH statement"
             result.error = last_error
             continue
         df, exec_error = workspace.execute_sql(sql)
