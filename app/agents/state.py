@@ -1,6 +1,8 @@
 """
 Shared state and result types for the multi-agent pipeline.
 All dataclasses are plain so they work under importlib loading.
+
+Phase 4.2: citations + grounding_line for trust / multi-turn evidence.
 """
 
 from __future__ import annotations
@@ -60,6 +62,10 @@ class AgentState:
     # Clarify stage
     clarify_questions: List[str] = field(default_factory=list)
 
+    # Phase 4.2 – evidence / grounding
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    grounding_line: Optional[str] = None
+
     # Pipeline bookkeeping
     steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -92,6 +98,10 @@ class AgentResult:
     trend_summary: Optional[str] = None
     anomalies: List[Any] = field(default_factory=list)
 
+    # Phase 4.2 – citations & grounding (shown in UI on every answer)
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    grounding_line: Optional[str] = None
+
     # Meta
     steps: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -110,4 +120,6 @@ class AgentResult:
             "message": self.message,
             "steps": self.steps,
             "warnings": self.warnings,
+            "grounding_line": self.grounding_line,
+            "citations": self.citations,
         }
