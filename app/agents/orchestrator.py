@@ -1,4 +1,7 @@
-"""Orchestrator – multi-agent pipeline (matches AgentState / AgentResult)."""
+"""Orchestrator – multi-agent pipeline (matches AgentState / AgentResult).
+
+Phase 4.2: carries citations + grounding_line from sql_agent to AgentResult.
+"""
 from __future__ import annotations
 
 import sys
@@ -13,7 +16,7 @@ if str(_ROOT) not in sys.path:
 import importlib.util
 
 
-def _load(name: str, path: Path, required_attrs: tuple = ()):
+def _load(name: str, path: Path, required_attrs: tuple = ()) -> Any:
     if name in sys.modules:
         mod = sys.modules[name]
         if required_attrs and not all(hasattr(mod, a) for a in required_attrs):
@@ -21,6 +24,8 @@ def _load(name: str, path: Path, required_attrs: tuple = ()):
         else:
             return mod
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {name} from {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     try:
@@ -79,6 +84,8 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
         forecast_horizon=getattr(state, "forecast_horizon", None),
         trend_summary=getattr(state, "trend_summary", None),
         anomalies=list(getattr(state, "anomalies", None) or []),
+        citations=list(getattr(state, "citations", None) or []),
+        grounding_line=getattr(state, "grounding_line", None),
         steps=list(getattr(state, "steps", None) or []),
         warnings=list(getattr(state, "warnings", None) or []),
         error=state.error or getattr(state, "sql_error", None),
