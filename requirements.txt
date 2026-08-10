@@ -12,3 +12,5 @@ google-generativeai
 plotly
 # optional for richer seasonality: prophet
 # optional chart PNG export: kaleido
+psycopg2-binary>=2.9
+pymysql>=1.1

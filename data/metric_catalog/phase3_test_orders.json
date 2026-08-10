@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "disabled": [
+    "row_count"
+  ],
+  "metrics": [
+    {
+      "name": "aov",
+      "label": "Average order value (AOV)",
+      "description": "SUM(amount) / COUNT(DISTINCT order) – not AVG(amount)",
+      "agg": "ratio",
+      "additivity": "non",
+      "measure_column": "amount",
+      "entity_column": "order_id",
+      "numerator": "amount",
+      "denominator": "order_id",
+      "expr": "SUM(\"amount\") / NULLIF(COUNT(DISTINCT \"order_id\"), 0)",
+      "filters": [],
+      "preferred": true,
+      "confidence": 0.9,
+      "tags": [
+        "revenue",
+        "ratio"
+      ],
+      "reason": "User override via Metrics Governance UI",
+      "version": 1,
+      "owner": "system",
+      "grain": "row",
+      "domain": "general",
+      "required_columns": [],
+      "sql_preview": "SUM(\"amount\") / NULLIF(COUNT(DISTINCT \"order_id\"), 0)",
+      "history": []
+    },
+    {
+      "name": "sum_amount",
+      "label": "Total_Revenue",
+      "description": "Sum of amount",
+      "agg": "sum",
+      "additivity": "full",
+      "measure_column": "amount",
+      "entity_column": null,
+      "numerator": null,
+      "denominator": null,
+      "expr": "SUM(\"amount\")",
+      "filters": [],
+      "preferred": true,
+      "confidence": 0.9299999999999999,
+      "tags": [
+        "revenue"
+      ],
+      "reason": "User override via Metrics Governance UI",
+      "version": 1,
+      "owner": "system",
+      "grain": "row",
+      "domain": "general",
+      "required_columns": [],
+      "sql_preview": "SUM(\"amount\")",
+      "history": []
+    }
+  ],
+  "notes": ""
+}

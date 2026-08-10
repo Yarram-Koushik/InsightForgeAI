@@ -1,0 +1,20 @@
+{
+  "id": "23ad70a8",
+  "name": "phase3_test_customers",
+  "source_filename": "phase3_test.xlsx",
+  "created_at": "2026-08-10T13:47:24.134785",
+  "metadata": {
+    "source_filename": "phase3_test.xlsx",
+    "original_rows": 5,
+    "original_columns": 3,
+    "created_at": "2026-08-10T13:47:24.134785",
+    "last_cleaned_at": "2026-08-10T13:47:24.140784",
+    "file_type": "xlsx",
+    "duckdb_registered": true,
+    "cleaned_rows": 5,
+    "cleaned_columns": 3
+  },
+  "issues": [],
+  "lineage": [],
+  "saved_at": "2026-08-10T13:47:24"
+}

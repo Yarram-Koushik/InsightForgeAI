@@ -1,0 +1,22 @@
+{
+  "workspace_id": "default",
+  "created_at": "2026-08-10T13:47:24",
+  "updated_at": "2026-08-10T13:56:55",
+  "datasets": [
+    {
+      "name": "phase3_test_customers",
+      "id": "23ad70a8",
+      "source_filename": "phase3_test.xlsx",
+      "rows": 5,
+      "saved_at": "2026-08-10T13:47:24"
+    },
+    {
+      "name": "phase3_test_orders",
+      "id": "8de796d3",
+      "source_filename": "phase3_test.xlsx",
+      "rows": 8,
+      "saved_at": "2026-08-10T13:56:55"
+    }
+  ],
+  "version": 1
+}
