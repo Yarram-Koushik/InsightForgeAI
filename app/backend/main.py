@@ -1,11 +1,22 @@
 """
 InsightForgeAI – FastAPI Backend Boundary (Phase 3.4–3.7)
 
-Endpoints: /health /ready /metrics /datasets /upload /ask /sql /audit
+Endpoints: / /health /ready /metrics /datasets /upload /ask /sql /audit
 Phase 3.5 auth + Phase 3.7 observability (logs, rate limit, metrics).
 """
 
 from __future__ import annotations
+
+try:
+    from pathlib import Path as _EnvPath
+    from dotenv import load_dotenv
+    _env_file = _EnvPath(__file__).resolve().parents[2] / ".env"
+    if _env_file.exists():
+        load_dotenv(_env_file, override=False)
+    else:
+        load_dotenv(override=False)
+except Exception:
+    pass
 
 import io
 import sys
@@ -165,7 +176,7 @@ app.add_middleware(
 async def observability_middleware(request: Request, call_next):
     path = request.url.path
     start = time.perf_counter()
-    if path not in ("/health", "/ready", "/metrics"):
+    if path not in ("/health", "/ready", "/metrics", "/"):
         key = request.headers.get("x-api-key") or ""
         if not key:
             auth = request.headers.get("authorization") or ""
@@ -324,6 +335,17 @@ def _client_ip(request: Request) -> Optional[str]:
     if request.client:
         return request.client.host
     return None
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "InsightForgeAI",
+        "docs": "/docs",
+        "health": "/health",
+        "ready": "/ready",
+        "metrics": "/metrics",
+    }
 
 
 @app.get("/health", response_model=HealthResponse)
