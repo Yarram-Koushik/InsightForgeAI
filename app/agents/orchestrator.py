@@ -1,5 +1,6 @@
-"""Orchestrator – Phase 2.3–2.7 multi-agent pipeline."""
+"""Orchestrator – multi-agent pipeline (matches AgentState / AgentResult)."""
 from __future__ import annotations
+
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -11,8 +12,8 @@ if str(_ROOT) not in sys.path:
 
 import importlib.util
 
+
 def _load(name: str, path: Path, required_attrs: tuple = ()):
-    """Load a module by path. Reload if a stale/empty module is already cached."""
     if name in sys.modules:
         mod = sys.modules[name]
         if required_attrs and not all(hasattr(mod, a) for a in required_attrs):
@@ -29,7 +30,12 @@ def _load(name: str, path: Path, required_attrs: tuple = ()):
         raise
     return mod
 
-_state_mod = _load("agent_state", _AGENTS_DIR / "state.py", required_attrs=("AgentState", "AgentResult", "Intent"))
+
+_state_mod = _load(
+    "agent_state",
+    _AGENTS_DIR / "state.py",
+    required_attrs=("AgentState", "AgentResult", "Intent"),
+)
 AgentState = _state_mod.AgentState
 AgentResult = _state_mod.AgentResult
 Intent = _state_mod.Intent
@@ -40,7 +46,47 @@ _insight = _load("insight_agent", _AGENTS_DIR / "insight_agent.py")
 _clarify = _load("clarify_agent", _AGENTS_DIR / "clarify_agent.py")
 _viz = _load("viz_agent", _AGENTS_DIR / "viz_agent.py")
 _forecast = _load("forecast_agent", _AGENTS_DIR / "forecast_agent.py")
-_ctx = _load("context_memory", _AGENTS_DIR.parent / "core" / "context_memory.py")
+
+try:
+    _ctx = _load("context_memory", _AGENTS_DIR.parent / "core" / "context_memory.py")
+except Exception:
+    _ctx = None
+
+
+def _intent_str(intent) -> str:
+    if intent is None:
+        return "unknown"
+    return intent.value if hasattr(intent, "value") else str(intent)
+
+
+def _from_state(state: AgentState, success: bool, message: Optional[str] = None) -> AgentResult:
+    insight = getattr(state, "insight_text", None) or getattr(state, "insight", None)
+    clarify = list(getattr(state, "clarify_questions", None) or [])
+    return AgentResult(
+        success=success,
+        question=state.question or "",
+        intent=_intent_str(state.intent),
+        intent_reason=state.intent_reason,
+        sql=state.sql,
+        result_df=state.result_df,
+        insight=insight,
+        clarify_questions=clarify,
+        chart_fig=getattr(state, "chart_fig", None),
+        chart_type=getattr(state, "chart_type", None),
+        chart_reason=getattr(state, "chart_reason", None),
+        forecast_df=getattr(state, "forecast_df", None),
+        forecast_method=getattr(state, "forecast_method", None),
+        forecast_horizon=getattr(state, "forecast_horizon", None),
+        trend_summary=getattr(state, "trend_summary", None),
+        anomalies=list(getattr(state, "anomalies", None) or []),
+        steps=list(getattr(state, "steps", None) or []),
+        warnings=list(getattr(state, "warnings", None) or []),
+        error=state.error or getattr(state, "sql_error", None),
+        provider=getattr(state, "provider", None),
+        model=getattr(state, "model", None),
+        message=message or insight or (clarify[0] if clarify else None) or ("Done." if success else "Failed."),
+    )
+
 
 def _meta_response(state: AgentState) -> AgentResult:
     tables = []
@@ -55,91 +101,128 @@ def _meta_response(state: AgentState) -> AgentResult:
     )
     if tables:
         msg += f" Loaded tables: {', '.join(tables)}."
-    return AgentResult(success=True, message=msg, intent=Intent.META, intent_reason="meta about system")
+    return AgentResult(
+        success=True,
+        question=state.question or "",
+        intent=_intent_str(Intent.META),
+        intent_reason=state.intent_reason or "meta about system",
+        message=msg,
+        steps=list(state.steps or []),
+    )
+
 
 def _unsupported_response(state: AgentState) -> AgentResult:
     return AgentResult(
         success=False,
-        message="I cannot answer that from the current dataset. Try a question about the loaded columns, or upload more data.",
-        intent=Intent.UNSUPPORTED,
+        question=state.question or "",
+        intent=_intent_str(Intent.UNSUPPORTED),
         intent_reason=state.intent_reason or "unsupported",
+        message=(
+            "I cannot answer that from the current dataset. "
+            "Try a question about the loaded columns, or upload more data."
+        ),
+        steps=list(state.steps or []),
     )
 
-def _from_state(state: AgentState, success: bool, message: Optional[str] = None) -> AgentResult:
-    return AgentResult(
-        success=success,
-        message=message or state.insight or state.clarify_message or ("Done." if success else "Failed."),
-        intent=state.intent,
-        intent_reason=state.intent_reason,
-        sql=state.sql,
-        result_df=state.result_df,
-        chart_html=getattr(state, "chart_html", None),
-        forecast_df=getattr(state, "forecast_df", None),
-        pipeline_steps=list(getattr(state, "pipeline_steps", []) or []),
-        provider=getattr(state, "provider", None),
-        model=getattr(state, "model", None),
-        error=state.error,
-    )
 
-def run_agent(question: str, table_name: str, workspace: Any = None) -> AgentResult:
-    state = AgentState(question=(question or "").strip(), table_name=table_name, workspace=workspace)
-    state.pipeline_steps = ["orchestrator:start"]
+def run_agent(
+    question: str = "",
+    table_name: str = "",
+    workspace: Any = None,
+    **kwargs,
+) -> AgentResult:
+    """
+    Entry point used by Streamlit UI and API.
+
+    Accepts:
+      run_agent(question, table_name, workspace)
+      run_agent(workspace=..., table_name=..., question=...)
+    """
+    if kwargs:
+        question = kwargs.get("question", question) or question
+        table_name = kwargs.get("table_name", table_name) or table_name
+        workspace = kwargs.get("workspace", workspace)
+
+    state = AgentState(
+        question=(question or "").strip(),
+        table_name=table_name or "",
+        workspace=workspace,
+    )
+    state.steps = ["orchestrator:start"]
+
     try:
-        # Optional conversation context
-        try:
-            _ctx.attach_context(state)
-        except Exception:
-            pass
+        if _ctx is not None and hasattr(_ctx, "attach_context"):
+            try:
+                _ctx.attach_context(state)
+            except Exception:
+                pass
 
-        state.pipeline_steps.append("router:start")
-        _router.route(state)
-        state.pipeline_steps.append(f"router:done:{(state.intent.value if state.intent else 'unknown')}")
+        state.steps.append("router:start")
+        if hasattr(_router, "classify"):
+            _router.classify(state)
+        elif hasattr(_router, "route"):
+            _router.route(state)
+        else:
+            state.intent = Intent.DATA_QUERY
+            state.intent_reason = "router missing; default data_query"
+        state.steps.append(f"router:done:{_intent_str(state.intent)}")
 
         if state.intent == Intent.META:
             return _meta_response(state)
         if state.intent == Intent.UNSUPPORTED:
             return _unsupported_response(state)
         if state.intent == Intent.CLARIFY:
-            state.pipeline_steps.append("clarify:start")
+            state.steps.append("clarify:start")
             _clarify.run(state)
-            state.pipeline_steps.append("clarify:done")
-            return _from_state(state, True, state.clarify_message or state.message)
+            state.steps.append("clarify:done")
+            msg = None
+            if state.clarify_questions:
+                msg = "I need a bit more detail:\n- " + "\n- ".join(state.clarify_questions[:5])
+            return _from_state(state, True, msg)
 
         if state.intent in (Intent.DATA_QUERY, Intent.INSIGHT, Intent.FORECAST):
-            state.pipeline_steps.append("sql_agent:start")
+            state.steps.append("sql_agent:start")
             _sql.run(state)
-            if state.sql_success:
-                state.pipeline_steps.append(f"sql_agent:ok:rows={0 if state.result_df is None else len(state.result_df)}")
-            else:
-                state.pipeline_steps.append("sql_agent:fail")
-                return _from_state(state, False, state.error or "SQL failed.")
+            if not state.sql_success:
+                state.steps.append("sql_agent:fail")
+                state.error = getattr(state, "sql_error", None) or "SQL failed."
+                return _from_state(state, False, state.error)
 
             if state.intent == Intent.INSIGHT:
-                state.pipeline_steps.append("insight:start")
+                state.steps.append("insight:start")
                 _insight.run(state)
-                state.pipeline_steps.append("insight:done")
+                state.steps.append("insight:done")
 
             if state.intent == Intent.FORECAST:
-                state.pipeline_steps.append("forecast:start")
+                state.steps.append("forecast:start")
                 _forecast.run(state)
-                state.pipeline_steps.append("forecast:done")
+                state.steps.append("forecast:done")
 
             try:
-                state.pipeline_steps.append("viz_agent:start")
+                state.steps.append("viz_agent:start")
                 _viz.run(state)
-                state.pipeline_steps.append("viz_agent:done")
+                state.steps.append("viz_agent:done")
             except Exception:
-                state.pipeline_steps.append("viz_agent:skip")
+                state.steps.append("viz_agent:skip")
 
-            try:
-                _ctx.remember(state)
-            except Exception:
-                pass
+            if _ctx is not None and hasattr(_ctx, "remember"):
+                try:
+                    _ctx.remember(state)
+                except Exception:
+                    pass
 
-            msg = state.insight or "Here is what I found."
+            msg = getattr(state, "insight_text", None) or "Here is what I found."
             return _from_state(state, True, msg)
 
         return _unsupported_response(state)
+
     except Exception as e:
-        state.pipeline_steps.append(f"orchestrator:error:{e}")
-        return AgentResult(success=False, message=f"Agent pipeline error: {e}", error=str(e))
+        state.steps.append(f"orchestrator:error:{e}")
+        return AgentResult(
+            success=False,
+            question=state.question or (question or ""),
+            intent=_intent_str(getattr(state, "intent", None)) or "unknown",
+            message=f"Agent pipeline error: {e}",
+            error=str(e),
+            steps=list(state.steps or []),
+        )
