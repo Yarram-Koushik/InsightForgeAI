@@ -4,7 +4,7 @@ AI-Powered Business Intelligence Assistant — *ChatGPT for company data*
 
 ## Status
 
-Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.3 ✅**
+Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.4 ✅**
 
 ## Phase 4 (Industry depth)
 
@@ -13,6 +13,7 @@ Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.3 ✅**
 | 4.1 Connectors (Postgres / MySQL, read-only, never persist secrets) | ✅ |
 | 4.2 Conversational memory & citations (follow-up expand, grounding line) | ✅ |
 | 4.3 Automated analytics depth (EDA pack, root-cause, what-if, RFM) | ✅ |
+| 4.4 Dashboards & Export (pin widgets, refresh, PDF + PPTX) | ✅ |
 
 ## Phase 3 (Option B – Industry)
 
@@ -58,6 +59,19 @@ In the **Chat & Analytics** tab (with a dataset loaded):
 | RFM | `show RFM segments` |
 
 Every answer shows a **grounding line** and optional **citations**. Follow-ups like `by region` or `only North` are expanded from chat history.
+
+## Phase 4.4 – Dashboards & Export
+
+1. Ask a question that returns SQL / a table / a chart.
+2. Click **📌 Pin to dashboard** on that turn.
+3. Open the **📌 Dashboard** tab → refresh widgets, remove, or export.
+4. **Export PDF** or **Export PPTX** for shareable reports.
+
+Widgets persist under `data/workspaces/{id}/dashboard/widgets.json` (metadata only; refresh re-runs SQL).
+
+```bash
+pytest tests/test_dashboard.py -q
+```
 
 ## Eval (Phase 3.6)
 
