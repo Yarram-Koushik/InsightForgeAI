@@ -1,4 +1,4 @@
-"""InsightForgeAI Streamlit UI – Phase 4.3 (industry)."""
+"""InsightForgeAI Streamlit UI – Phase 4.4 (Dashboards & Export)."""
 from __future__ import annotations
 import os, sys, uuid, warnings, importlib.util, types
 from pathlib import Path
@@ -60,6 +60,8 @@ generate_quality_report = _profiling.generate_quality_report
 column_level_profile = _profiling.column_level_profile
 run_agent = _orch.run_agent
 build_evidence_pack = getattr(_export, "build_evidence_pack", None)
+build_dashboard_pdf = getattr(_export, "build_dashboard_pdf", None)
+build_dashboard_pptx = getattr(_export, "build_dashboard_pptx", None)
 
 _gov_mod = _sl_mod = _gov_err = None
 try:
@@ -80,6 +82,12 @@ try:
 except Exception:
     pass
 
+_dash_mod = None
+try:
+    _dash_mod = _load("app.core.dashboard", PROJECT_ROOT / "app/core/dashboard.py", "app.core")
+except Exception:
+    pass
+
 st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
 if "workspace" not in st.session_state:
@@ -94,6 +102,8 @@ if "connector_tables" not in st.session_state:
     st.session_state.connector_tables = []
 if "connector_config" not in st.session_state:
     st.session_state.connector_config = None
+if "_dash_refresh_cache" not in st.session_state:
+    st.session_state._dash_refresh_cache = {}
 
 def _get_durable_store():
     if st.session_state.get("_durable_store") is not None:
@@ -138,6 +148,15 @@ def _persist_chat_turn(turn: dict, table_name: str) -> None:
     except Exception:
         pass
 
+def _dash_root():
+    store = _get_durable_store()
+    if store is not None:
+        return store
+    # Fallback in-memory path under project data
+    root = PROJECT_ROOT / "data" / "workspaces" / os.getenv("INSIGHTFORGE_WORKSPACE_ID", "default")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
 if not st.session_state.get("_ws_restored"):
     store = _get_durable_store()
     if store is not None:
@@ -168,7 +187,7 @@ if not st.session_state.get("_ws_restored"):
     st.session_state["_ws_restored"] = True
 
 st.sidebar.title("InsightForgeAI")
-st.sidebar.caption("Phase 4.3 · Automated Analytics Depth")
+st.sidebar.caption("Phase 4.4 · Dashboards & Export")
 st.sidebar.markdown("### Workspace")
 uploaded_files = st.sidebar.file_uploader("Upload files", type=["csv", "xlsx", "xls", "json", "parquet"], accept_multiple_files=True, key="sidebar_upload")
 
@@ -184,12 +203,17 @@ if uploaded_files:
             issues = detect_cleaning_issues(df)
             cleaned = apply_safe_cleaning(df, issues) if apply_safe_cleaning else df
             if DatasetRecord is not None:
-                rec = DatasetRecord(name=name, source_file=uf.name, raw_df=df,
-                    cleaned_df=cleaned if isinstance(cleaned, pd.DataFrame) else df,
-                    schema_info=schema, cleaning_log=issues)
-                st.session_state.workspace.add_record(rec)
+                try:
+                    rec = DatasetRecord(name=name, raw_df=df, source_filename=uf.name)
+                    rec.cleaned_df = cleaned if isinstance(cleaned, pd.DataFrame) else df
+                    st.session_state.workspace.datasets[name] = rec
+                    st.session_state.workspace.register_in_duckdb(name)
+                except Exception:
+                    st.session_state.workspace.add_dataset(name, cleaned if isinstance(cleaned, pd.DataFrame) else df, uf.name)
+                    st.session_state.workspace.register_in_duckdb(name)
             else:
-                st.session_state.workspace.add_dataframe(name, cleaned if isinstance(cleaned, pd.DataFrame) else df)
+                st.session_state.workspace.add_dataset(name, cleaned if isinstance(cleaned, pd.DataFrame) else df, uf.name)
+                st.session_state.workspace.register_in_duckdb(name)
             _persist_dataset(name)
             st.sidebar.success(f"Loaded `{name}` ({len(df):,} rows)")
         except Exception as e:
@@ -257,8 +281,8 @@ if not available_tables:
     st.info("Upload files from the sidebar or connect a database to get started.")
     st.stop()
 
-tab_chat, tab_eda, tab_quality, tab_sql, tab_gov, tab_schema = st.tabs(
-    ["💬 Chat & Analytics", "🔍 EDA Pack", "📈 Quality", "🛠 SQL Lab", "📐 Metrics Governance", "🗂 Schema"]
+tab_chat, tab_dash, tab_eda, tab_quality, tab_sql, tab_gov, tab_schema = st.tabs(
+    ["💬 Chat & Analytics", "📌 Dashboard", "🔍 EDA Pack", "📈 Quality", "🛠 SQL Lab", "📐 Metrics Governance", "🗂 Schema"]
 )
 
 def _render_turn(turn, i):
@@ -308,6 +332,19 @@ def _render_turn(turn, i):
         with st.expander("Agent pipeline steps", expanded=False):
             steps = turn.get("steps") or []
             st.code(" → ".join(steps) if steps else "No steps")
+
+        # Phase 4.4 – Pin to dashboard
+        can_pin = bool(turn.get("success")) and (bool(turn.get("sql")) or turn.get("result_df") is not None)
+        if can_pin and _dash_mod is not None:
+            pin_key = f"pin_{turn.get('id', i)}"
+            if st.button("📌 Pin to dashboard", key=pin_key, help="Save this answer as a dashboard widget"):
+                try:
+                    w = _dash_mod.pin_from_turn(turn, table_name=selected_table or turn.get("table_name"))
+                    _dash_mod.add_widget(_dash_root(), w)
+                    st.success(f"Pinned: {w.title[:60]}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Pin failed: {e}")
 
 with tab_chat:
     st.markdown(f"**Active dataset:** `{selected_table}`")
@@ -387,6 +424,116 @@ with tab_chat:
                 st.session_state.chat_history.append(turn)
                 _persist_chat_turn(turn, selected_table or "")
                 st.rerun()
+
+# ---------------------------------------------------------------------------
+# Phase 4.4 – Dashboard tab
+# ---------------------------------------------------------------------------
+with tab_dash:
+    st.markdown("#### Pinned dashboard widgets")
+    st.caption("Pin answers from Chat · refresh against live data · export PDF / PPTX")
+
+    if _dash_mod is None:
+        st.warning("Dashboard module failed to load.")
+    else:
+        root = _dash_root()
+        widgets = _dash_mod.load_widgets(root)
+
+        c_ref, c_pdf, c_pptx, c_clear = st.columns([1.2, 1.2, 1.2, 1])
+        with c_ref:
+            do_refresh_all = st.button("🔄 Refresh all", use_container_width=True)
+        with c_pdf:
+            do_pdf = st.button("📄 Export PDF", use_container_width=True)
+        with c_pptx:
+            do_pptx = st.button("📊 Export PPTX", use_container_width=True)
+        with c_clear:
+            if st.button("Clear dashboard", use_container_width=True):
+                _dash_mod.clear_dashboard(root)
+                st.session_state._dash_refresh_cache = {}
+                st.rerun()
+
+        if do_refresh_all and widgets:
+            with st.spinner("Refreshing widgets…"):
+                updated = []
+                for w in widgets:
+                    uw, df, _ = _dash_mod.refresh_widget(w, st.session_state.workspace)
+                    updated.append(uw)
+                    if df is not None:
+                        st.session_state._dash_refresh_cache[uw.id] = df
+                _dash_mod.save_widgets(root, updated)
+                widgets = updated
+                st.success(f"Refreshed {len(widgets)} widget(s)")
+
+        if do_pdf and build_dashboard_pdf is not None:
+            payload = build_dashboard_pdf(widgets, title="InsightForgeAI Dashboard")
+            st.download_button(
+                label=f"Download {payload.filename}",
+                data=payload.data,
+                file_name=payload.filename,
+                mime=payload.mime,
+                key="dl_pdf",
+            )
+            if payload.note:
+                st.caption(payload.note)
+
+        if do_pptx and build_dashboard_pptx is not None:
+            payload = build_dashboard_pptx(widgets, title="InsightForgeAI Dashboard")
+            st.download_button(
+                label=f"Download {payload.filename}",
+                data=payload.data,
+                file_name=payload.filename,
+                mime=payload.mime,
+                key="dl_pptx",
+            )
+            if payload.note:
+                st.caption(payload.note)
+
+        if not widgets:
+            st.info("No widgets yet. Ask a question in Chat, then click **📌 Pin to dashboard** on a successful answer.")
+        else:
+            for w in widgets:
+                with st.container(border=True):
+                    status_icon = {"ok": "✅", "stale": "⚠️", "error": "❌"}.get(w.status, "•")
+                    st.markdown(f"**{status_icon} {w.title}**")
+                    meta = f"Dataset: `{w.table_name}`"
+                    if w.chart_type:
+                        meta += f" · Chart: {w.chart_type}"
+                    if w.last_row_count is not None:
+                        meta += f" · Rows: {w.last_row_count}"
+                    if w.last_refreshed:
+                        meta += f" · Refreshed: {w.last_refreshed}"
+                    st.caption(meta)
+                    if w.grounding_line:
+                        st.caption(f"📎 {w.grounding_line}")
+                    if w.insight:
+                        st.markdown(w.insight)
+                    if w.error:
+                        st.error(w.error)
+                    if w.sql:
+                        with st.expander("SQL (evidence)", expanded=False):
+                            st.code(w.sql, language="sql")
+
+                    # Show last refreshed dataframe from session cache
+                    cached = st.session_state._dash_refresh_cache.get(w.id)
+                    if isinstance(cached, pd.DataFrame) and not cached.empty:
+                        with st.expander("Latest data", expanded=False):
+                            st.dataframe(cached, use_container_width=True, hide_index=True)
+
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("Refresh", key=f"ref_{w.id}"):
+                            uw, df, err = _dash_mod.refresh_widget(w, st.session_state.workspace)
+                            # Persist updated widget
+                            all_w = _dash_mod.load_widgets(root)
+                            all_w = [uw if x.id == w.id else x for x in all_w]
+                            _dash_mod.save_widgets(root, all_w)
+                            if df is not None:
+                                st.session_state._dash_refresh_cache[w.id] = df
+                            st.rerun()
+                    with b2:
+                        if st.button("Remove", key=f"rm_{w.id}"):
+                            _dash_mod.remove_widget(root, w.id)
+                            st.session_state._dash_refresh_cache.pop(w.id, None)
+                            st.rerun()
 
 with tab_eda:
     st.markdown(f"#### One-click EDA on `{selected_table}`")
