@@ -1,6 +1,7 @@
 """Orchestrator – multi-agent pipeline (matches AgentState / AgentResult).
 
-Phase 4.2: carries citations + grounding_line from sql_agent to AgentResult.
+Phase 4.2: citations + grounding_line
+Phase 4.3: analytics_agent paths (EDA, root-cause, what-if, RFM)
 """
 from __future__ import annotations
 
@@ -53,6 +54,11 @@ _viz = _load("viz_agent", _AGENTS_DIR / "viz_agent.py")
 _forecast = _load("forecast_agent", _AGENTS_DIR / "forecast_agent.py")
 
 try:
+    _analytics = _load("analytics_agent", _AGENTS_DIR / "analytics_agent.py")
+except Exception:
+    _analytics = None
+
+try:
     _ctx = _load("context_memory", _AGENTS_DIR.parent / "core" / "context_memory.py")
 except Exception:
     _ctx = None
@@ -67,7 +73,7 @@ def _intent_str(intent) -> str:
 def _from_state(state: AgentState, success: bool, message: Optional[str] = None) -> AgentResult:
     insight = getattr(state, "insight_text", None) or getattr(state, "insight", None)
     clarify = list(getattr(state, "clarify_questions", None) or [])
-    return AgentResult(
+    result = AgentResult(
         success=success,
         question=state.question or "",
         intent=_intent_str(state.intent),
@@ -93,6 +99,10 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
         model=getattr(state, "model", None),
         message=message or insight or (clarify[0] if clarify else None) or ("Done." if success else "Failed."),
     )
+    # Phase 4.3 optional extras (UI may read via getattr)
+    result.extra_charts = list(getattr(state, "extra_charts", None) or [])
+    result.eda_pack = getattr(state, "eda_pack", None)
+    return result
 
 
 def _meta_response(state: AgentState) -> AgentResult:
@@ -103,8 +113,9 @@ def _meta_response(state: AgentState) -> AgentResult:
     except Exception:
         tables = []
     msg = (
-        "I am InsightForgeAI — an AI BI assistant for your uploaded data. "
-        "I can run SQL analytics, explain insights, forecast trends, and clarify vague questions."
+        "I am InsightForgeAI — an AI BI assistant for your company data. "
+        "I can run SQL analytics, EDA, root-cause breakdowns, what-if scenarios, "
+        "forecasts, and RFM when the right columns exist."
     )
     if tables:
         msg += f" Loaded tables: {', '.join(tables)}."
@@ -138,13 +149,6 @@ def run_agent(
     workspace: Any = None,
     **kwargs,
 ) -> AgentResult:
-    """
-    Entry point used by Streamlit UI and API.
-
-    Accepts:
-      run_agent(question, table_name, workspace)
-      run_agent(workspace=..., table_name=..., question=...)
-    """
     if kwargs:
         question = kwargs.get("question", question) or question
         table_name = kwargs.get("table_name", table_name) or table_name
@@ -163,6 +167,23 @@ def run_agent(
                 _ctx.attach_context(state)
             except Exception:
                 pass
+
+        # Phase 4.3 – specialized analytics paths take priority over generic SQL
+        analytics_path = None
+        if _analytics is not None and hasattr(_analytics, "detect_analytics_path"):
+            try:
+                analytics_path = _analytics.detect_analytics_path(state.question or "")
+            except Exception:
+                analytics_path = None
+
+        if analytics_path and workspace and table_name:
+            state.intent = Intent.INSIGHT
+            state.intent_reason = f"analytics_path:{analytics_path}"
+            state.steps.append(f"analytics:{analytics_path}:start")
+            _analytics.run(state, path=analytics_path)
+            success = bool(getattr(state, "sql_success", False))
+            msg = getattr(state, "insight_text", None) or ("Done." if success else state.error or "Failed.")
+            return _from_state(state, success, msg)
 
         state.steps.append("router:start")
         if hasattr(_router, "classify"):
