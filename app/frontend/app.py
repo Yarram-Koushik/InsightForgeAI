@@ -42,7 +42,6 @@ column_level_profile = profiling_module.column_level_profile
 Workspace = dm_module.Workspace
 
 def _get_durable_store():
-    """Lazy-load Phase 3.3 workspace store (one per Streamlit session)."""
     if st.session_state.get("_durable_store") is not None:
         return st.session_state["_durable_store"]
     try:
@@ -64,7 +63,6 @@ def _get_durable_store():
 
 
 def _persist_dataset(record_name: str) -> None:
-    """Save a loaded dataset to disk so F5 restore works."""
     try:
         store = _get_durable_store()
         if store is None:
@@ -77,7 +75,6 @@ def _persist_dataset(record_name: str) -> None:
 
 
 def _persist_chat_turn(turn: dict, table_name: str) -> None:
-    """Append a chat turn (no heavy dataframes) to durable history."""
     try:
         store = _get_durable_store()
         if store is None:
@@ -129,6 +126,48 @@ chart_to_html_bytes = export_module.chart_to_html_bytes
 chart_to_png_bytes = export_module.chart_to_png_bytes
 safe_filename_part = export_module.safe_filename_part
 
+# Phase 3.5 – load governance modules ONCE at startup (never inside a tab)
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+_gov_mod = None
+_sl_mod = None
+try:
+    import types
+    if "app" not in sys.modules:
+        _app_pkg = types.ModuleType("app")
+        _app_pkg.__path__ = [str(project_root / "app")]
+        sys.modules["app"] = _app_pkg
+    if "app.core" not in sys.modules:
+        _core_pkg = types.ModuleType("app.core")
+        _core_pkg.__path__ = [str(project_root / "app" / "core")]
+        sys.modules["app.core"] = _core_pkg
+
+    _sl_path = project_root / "app" / "core" / "semantic_layer.py"
+    if _sl_path.exists():
+        _sl_spec = importlib.util.spec_from_file_location(
+            "app.core.semantic_layer", _sl_path,
+            submodule_search_locations=[str(project_root / "app" / "core")],
+        )
+        _sl_mod = importlib.util.module_from_spec(_sl_spec)
+        sys.modules["app.core.semantic_layer"] = _sl_mod
+        sys.modules["semantic_layer"] = _sl_mod
+        _sl_spec.loader.exec_module(_sl_mod)
+
+    _gov_path = project_root / "app" / "core" / "metric_governance.py"
+    if _gov_path.exists() and _sl_mod is not None:
+        _gov_spec = importlib.util.spec_from_file_location(
+            "app.core.metric_governance", _gov_path,
+            submodule_search_locations=[str(project_root / "app" / "core")],
+        )
+        _gov_mod = importlib.util.module_from_spec(_gov_spec)
+        sys.modules["app.core.metric_governance"] = _gov_mod
+        sys.modules["metric_governance"] = _gov_mod
+        _gov_spec.loader.exec_module(_gov_mod)
+except Exception:
+    _gov_mod = None
+    _sl_mod = None
+
 warnings.filterwarnings("ignore", message="Could not infer format")
 st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide")
 
@@ -148,7 +187,6 @@ if "chat_dataset" not in st.session_state:
 if "_ws_restored" not in st.session_state:
     st.session_state["_ws_restored"] = False
 
-# Phase 3.3 – restore datasets (+ lightweight chat) once per browser session
 if not st.session_state.get("_ws_restored"):
     store = _get_durable_store()
     if store is not None:
@@ -164,28 +202,16 @@ if not st.session_state.get("_ws_restored"):
                     for t in turns:
                         d = t.to_dict() if hasattr(t, "to_dict") else dict(t)
                         light.append({
-                            "id": d.get("id"),
-                            "question": d.get("question"),
-                            "success": d.get("success", True),
-                            "intent": d.get("intent"),
-                            "intent_reason": d.get("intent_reason"),
-                            "message": d.get("message"),
-                            "sql": d.get("sql"),
-                            "insight": d.get("insight"),
+                            "id": d.get("id"), "question": d.get("question"),
+                            "success": d.get("success", True), "intent": d.get("intent"),
+                            "intent_reason": d.get("intent_reason"), "message": d.get("message"),
+                            "sql": d.get("sql"), "insight": d.get("insight"),
                             "clarify_questions": d.get("clarify_questions") or [],
-                            "result_df": None,
-                            "forecast_df": None,
-                            "anomalies": [],
-                            "chart_fig": None,
-                            "chart_type": None,
-                            "chart_reason": None,
-                            "steps": d.get("steps") or [],
-                            "warnings": d.get("warnings") or [],
-                            "error": d.get("error"),
-                            "provider": d.get("provider"),
-                            "model": d.get("model"),
-                            "evidence": None,
-                            "_restored": True,
+                            "result_df": None, "forecast_df": None, "anomalies": [],
+                            "chart_fig": None, "chart_type": None, "chart_reason": None,
+                            "steps": d.get("steps") or [], "warnings": d.get("warnings") or [],
+                            "error": d.get("error"), "provider": d.get("provider"),
+                            "model": d.get("model"), "evidence": None, "_restored": True,
                         })
                         if d.get("table_name") and not st.session_state.chat_dataset:
                             st.session_state.chat_dataset = d.get("table_name")
@@ -263,9 +289,7 @@ if uploaded_files:
 
 dataset_names = st.session_state.workspace.list_datasets()
 if st.session_state.get("_restored_names"):
-    st.sidebar.success(
-        "Restored from disk: " + ", ".join(st.session_state["_restored_names"])
-    )
+    st.sidebar.success("Restored from disk: " + ", ".join(st.session_state["_restored_names"]))
     st.session_state["_restored_names"] = None
 if dataset_names:
     selected_table = st.sidebar.selectbox("Select Dataset", options=dataset_names, key="sidebar_select_dataset")
@@ -287,16 +311,14 @@ if selected_table:
 
     st.markdown("---")
     st.markdown("### Ask InsightForge")
-    st.caption("Conversational analysis with full evidence. Router → SQL → Insight → Forecast → Visualization · Export any answer.")
+    st.caption("Conversational analysis with full evidence.")
 
     if st.session_state.chat_dataset != selected_table:
-        # Keep history if it was restored for this table; otherwise clear when switching
         if not any(t.get("_restored") for t in (st.session_state.chat_history or [])):
             st.session_state.chat_history = []
         st.session_state.chat_dataset = selected_table
 
     hist = st.session_state.chat_history
-
     if hist:
         st.markdown(f"**Conversation** · {len(hist)} turn(s)")
         for i, turn in enumerate(hist):
@@ -306,10 +328,7 @@ if selected_table:
                 intent_label = (turn.get("intent") or "unknown").replace("_", " ").title()
                 st.caption(f"Route: **{intent_label}**" + (f" — {turn.get('intent_reason')}" if turn.get("intent_reason") else ""))
                 if turn.get("message"):
-                    if turn.get("success"):
-                        st.success(turn["message"])
-                    else:
-                        st.error(turn["message"])
+                    (st.success if turn.get("success") else st.error)(turn["message"])
                 if turn.get("clarify_questions"):
                     st.markdown("**Try asking:**")
                     for q in turn["clarify_questions"]:
@@ -318,18 +337,10 @@ if selected_table:
                     with st.expander("Generated SQL (evidence)", expanded=False):
                         st.code(turn["sql"], language="sql")
                 if turn.get("chart_fig") is not None:
-                    chart_label = (turn.get("chart_type") or "chart").title()
-                    reason = turn.get("chart_reason") or ""
-                    st.markdown(f"**Chart · {chart_label}**")
-                    if reason:
-                        st.caption(reason)
+                    st.markdown(f"**Chart · {(turn.get('chart_type') or 'chart').title()}**")
+                    if turn.get("chart_reason"):
+                        st.caption(turn["chart_reason"])
                     st.plotly_chart(turn["chart_fig"], width="stretch", key=f"chart_{turn.get('id', i)}")
-                if turn.get("forecast_df") is not None:
-                    with st.expander("Forecast values (future periods)", expanded=False):
-                        st.dataframe(turn["forecast_df"], width="stretch", hide_index=True)
-                if turn.get("anomalies"):
-                    with st.expander(f"Anomaly flags ({len(turn['anomalies'])})", expanded=False):
-                        st.dataframe(turn["anomalies"], width="stretch", hide_index=True)
                 if turn.get("result_df") is not None:
                     with st.expander("Data table", expanded=turn.get("chart_fig") is None):
                         st.dataframe(turn["result_df"], width="stretch", hide_index=True)
@@ -342,49 +353,19 @@ if selected_table:
                     st.error(turn["error"])
                 with st.expander("Agent pipeline steps", expanded=False):
                     steps = turn.get("steps") or []
-                    if steps:
-                        st.code(" → ".join(steps))
-                    else:
-                        st.caption("No steps recorded.")
-                    if turn.get("provider"):
-                        st.caption(f"Provider: {turn.get('provider')} · Model: {turn.get('model') or '—'}")
-                with st.expander("Export this answer", expanded=False):
-                    stamp = safe_filename_part(turn.get("id") or str(i))
-                    qpart = safe_filename_part(turn.get("question") or "answer")
-                    c1, c2, c3 = st.columns(3)
-                    if turn.get("result_df") is not None:
-                        payload = dataframe_to_csv_bytes(turn["result_df"])
-                        if payload.data:
-                            c1.download_button("⬇ Result CSV", data=payload.data, file_name=f"result_{qpart}_{stamp}.csv", mime=payload.mime, key=f"csv_result_{i}")
-                    if turn.get("forecast_df") is not None:
-                        payload = dataframe_to_csv_bytes(turn["forecast_df"])
-                        if payload.data:
-                            c2.download_button("⬇ Forecast CSV", data=payload.data, file_name=f"forecast_{qpart}_{stamp}.csv", mime=payload.mime, key=f"csv_fc_{i}")
-                    pack = turn.get("evidence")
-                    if pack:
-                        c3.download_button("⬇ Evidence JSON", data=evidence_to_json(pack), file_name=f"evidence_{qpart}_{stamp}.json", mime="application/json", key=f"ev_json_{i}")
-                        st.download_button("⬇ Evidence Markdown", data=evidence_to_markdown(pack), file_name=f"evidence_{qpart}_{stamp}.md", mime="text/markdown", key=f"ev_md_{i}")
-                    if turn.get("chart_fig") is not None:
-                        html_payload = chart_to_html_bytes(turn["chart_fig"], title=qpart)
-                        if html_payload and html_payload.data:
-                            st.download_button("⬇ Chart HTML", data=html_payload.data, file_name=html_payload.filename, mime=html_payload.mime, key=f"chart_html_{i}")
-                        png_payload = chart_to_png_bytes(turn["chart_fig"], title=qpart)
-                        if png_payload and png_payload.data:
-                            st.download_button("⬇ Chart PNG", data=png_payload.data, file_name=png_payload.filename, mime=png_payload.mime, key=f"chart_png_{i}")
-                        else:
-                            st.caption("PNG export needs `pip install kaleido` (optional). HTML always works.")
+                    st.code(" → ".join(steps) if steps else "No steps recorded.")
     else:
-        st.info("Ask a question below to start the conversation. Answers stay in this session with full evidence.")
+        st.info("Ask a question below to start the conversation.")
 
     with st.container(border=True):
         col_in, col_btn, col_clear = st.columns([6, 1, 1])
         with col_in:
-            nl_question = st.text_input("Your question", placeholder="e.g. How many per Branch?  |  Forecast next 30 days", key="nl_question", label_visibility="collapsed")
+            nl_question = st.text_input("Your question", placeholder="e.g. List order_id and customer_name", key="nl_question", label_visibility="collapsed")
         with col_btn:
             ask_clicked = st.button("Ask", type="primary", use_container_width=True)
         with col_clear:
             clear_clicked = st.button("Clear", use_container_width=True)
-        st.caption("Agents: Router · SQL · Insight · Forecast · Viz · Clarify  |  Keys in .env")
+        st.caption("Agents: Router · SQL · Insight · Forecast · Viz · Clarify")
         if clear_clicked:
             st.session_state.chat_history = []
             st.rerun()
@@ -394,14 +375,10 @@ if selected_table:
             import uuid
             pack = build_evidence_pack(question=nl_question.strip(), table_name=selected_table, agent_result=agent_result, source_filename=getattr(record, "source_filename", None))
             turn = {
-                "id": str(uuid.uuid4())[:8],
-                "question": nl_question.strip(),
-                "success": bool(agent_result.success),
-                "intent": agent_result.intent,
-                "intent_reason": agent_result.intent_reason,
-                "message": agent_result.message,
-                "sql": agent_result.sql,
-                "insight": agent_result.insight,
+                "id": str(uuid.uuid4())[:8], "question": nl_question.strip(),
+                "success": bool(agent_result.success), "intent": agent_result.intent,
+                "intent_reason": agent_result.intent_reason, "message": agent_result.message,
+                "sql": agent_result.sql, "insight": agent_result.insight,
                 "clarify_questions": list(agent_result.clarify_questions or []),
                 "result_df": agent_result.result_df,
                 "forecast_df": getattr(agent_result, "forecast_df", None),
@@ -409,12 +386,9 @@ if selected_table:
                 "chart_fig": getattr(agent_result, "chart_fig", None),
                 "chart_type": getattr(agent_result, "chart_type", None),
                 "chart_reason": getattr(agent_result, "chart_reason", None),
-                "steps": list(agent_result.steps or []),
-                "warnings": list(agent_result.warnings or []),
-                "error": agent_result.error,
-                "provider": agent_result.provider,
-                "model": agent_result.model,
-                "evidence": pack,
+                "steps": list(agent_result.steps or []), "warnings": list(agent_result.warnings or []),
+                "error": agent_result.error, "provider": agent_result.provider,
+                "model": agent_result.model, "evidence": pack,
             }
             st.session_state.chat_history.append(turn)
             _persist_chat_turn(turn, selected_table)
@@ -452,11 +426,10 @@ if selected_table:
         color = "green" if score >= 85 else ("orange" if score >= 70 else "red")
         st.markdown(f"### Overall Quality Score: :{color}[{score}/100]")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Completeness", f"{quality['completeness']['score']}%", help=quality['completeness']['details'])
-        c2.metric("Uniqueness", f"{quality['uniqueness']['score']}%", help=quality['uniqueness']['details'])
-        c3.metric("Validity", f"{quality['validity']['score']}%", help=quality['validity']['details'])
+        c1.metric("Completeness", f"{quality['completeness']['score']}%")
+        c2.metric("Uniqueness", f"{quality['uniqueness']['score']}%")
+        c3.metric("Validity", f"{quality['validity']['score']}%")
         c4.metric("Memory", f"{quality['memory_mb']} MB")
-        st.markdown("##### Column-Level Profile")
         st.dataframe(column_level_profile(df), width="stretch", hide_index=True)
 
     with tab4:
@@ -469,7 +442,6 @@ if selected_table:
             st.markdown("**Available tables (use these exact names):**")
             for t in available_tables:
                 st.code(t, language=None)
-            st.info("Use exact table names (e.g. phase3_test_orders), not plain 'orders'.")
             selected_for_schema = st.selectbox("Inspect table schema", options=available_tables, key="schema_inspect")
             if selected_for_schema:
                 st.dataframe(st.session_state.workspace.get_table_schema(selected_for_schema), width="stretch", hide_index=True)
@@ -489,21 +461,12 @@ if selected_table:
         st.markdown("#### Metric Governance (Phase 3.5)")
         st.caption(f"Active dataset: `{selected_table}`")
         st.caption("Browse metrics, override definitions, disable or add custom metrics.")
-        try:
-            import importlib.util as _ilu
-            _gov_path = project_root / "app" / "core" / "metric_governance.py"
-            _sl_path = project_root / "app" / "core" / "semantic_layer.py"
-            if not _gov_path.exists() or not _sl_path.exists():
-                st.warning("metric_governance.py or semantic_layer.py not found.")
-            else:
-                _gov_spec = _ilu.spec_from_file_location("metric_governance_ui", _gov_path)
-                gov = _ilu.module_from_spec(_gov_spec)
-                sys.modules["metric_governance_ui"] = gov
-                _gov_spec.loader.exec_module(gov)
-                _sl_spec = _ilu.spec_from_file_location("semantic_layer_ui", _sl_path)
-                sl = _ilu.module_from_spec(_sl_spec)
-                sys.modules["semantic_layer_ui"] = sl
-                _sl_spec.loader.exec_module(sl)
+        if _gov_mod is None or _sl_mod is None:
+            st.warning("Metric governance modules failed to load at startup. Check app/core/metric_governance.py and semantic_layer.py.")
+        else:
+            try:
+                gov = _gov_mod
+                sl = _sl_mod
                 model = gov.build_governed_semantic_model(st.session_state.workspace, selected_table)
                 cat_info = gov.catalog_summary(selected_table)
                 c1, c2, c3, c4 = st.columns(4)
@@ -513,7 +476,11 @@ if selected_table:
                 c4.metric("Disabled", cat_info["disabled_count"])
                 rows = []
                 for m in model.metrics:
-                    rows.append({"Name": m.name, "Label": m.label, "Agg": m.agg.value if hasattr(m.agg, "value") else str(m.agg), "SQL": m.sql_expression(), "Preferred": m.preferred})
+                    rows.append({
+                        "Name": m.name, "Label": m.label,
+                        "Agg": m.agg.value if hasattr(m.agg, "value") else str(m.agg),
+                        "SQL": m.sql_expression(), "Preferred": m.preferred,
+                    })
                 if rows:
                     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
                 else:
@@ -532,7 +499,16 @@ if selected_table:
                             save_btn = col_a.form_submit_button("Save override", type="primary")
                             disable_btn = col_b.form_submit_button("Disable metric")
                             if save_btn:
-                                updated = sl.Metric(name=chosen.name, label=new_label.strip() or chosen.label, description=chosen.description or "", agg=chosen.agg, additivity=chosen.additivity, measure_column=chosen.measure_column, entity_column=chosen.entity_column, numerator=chosen.numerator, denominator=chosen.denominator, expr=new_expr.strip() or chosen.expr, filters=list(chosen.filters or []), preferred=bool(new_preferred), confidence=chosen.confidence, tags=list(chosen.tags or []), reason="User override via Metrics Governance UI")
+                                updated = sl.Metric(
+                                    name=chosen.name, label=new_label.strip() or chosen.label,
+                                    description=chosen.description or "", agg=chosen.agg,
+                                    additivity=chosen.additivity, measure_column=chosen.measure_column,
+                                    entity_column=chosen.entity_column, numerator=chosen.numerator,
+                                    denominator=chosen.denominator, expr=new_expr.strip() or chosen.expr,
+                                    filters=list(chosen.filters or []), preferred=bool(new_preferred),
+                                    confidence=chosen.confidence, tags=list(chosen.tags or []),
+                                    reason="User override via Metrics Governance UI",
+                                )
                                 gov.set_metric_override(selected_table, updated)
                                 st.success(f"Saved override for `{chosen.name}`")
                                 st.rerun()
@@ -544,8 +520,8 @@ if selected_table:
                     gov.reset_catalog(selected_table)
                     st.success("Catalog cleared.")
                     st.rerun()
-        except Exception as e:
-            st.error(f"Could not load metric governance UI: {e}")
-            st.exception(e)
+            except Exception as e:
+                st.error(f"Could not render metric governance UI: {e}")
+                st.exception(e)
 else:
     st.info("Upload files from the sidebar to get started. After load, data is saved under data/workspaces/ and survives F5.")
