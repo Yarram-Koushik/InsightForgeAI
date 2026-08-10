@@ -1,24 +1,30 @@
 # InsightForgeAI
 
-AI-Powered Business Intelligence Assistant
+AI-Powered Business Intelligence Assistant — *ChatGPT for company data*
 
 ## Status
 
-Phase 1 ✅ · Phase 2 ✅ · **Phase 3.1–3.7 ✅**
+Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.3 ✅**
+
+## Phase 4 (Industry depth)
+
+| Sub-phase | Status |
+|-----------|--------|
+| 4.1 Connectors (Postgres / MySQL, read-only, never persist secrets) | ✅ |
+| 4.2 Conversational memory & citations (follow-up expand, grounding line) | ✅ |
+| 4.3 Automated analytics depth (EDA pack, root-cause, what-if, RFM) | ✅ |
 
 ## Phase 3 (Option B – Industry)
 
 | Sub-phase | Status |
 |-----------|--------|
-| 3.1 Semantic Metric Layer | Partial |
+| 3.1 Semantic Metric Layer | ✅ |
 | 3.2 Multi-Dataset Joins | ✅ |
 | 3.3 Durable Workspace | ✅ |
 | 3.4 FastAPI Boundary | ✅ |
 | 3.5 Security, Auth, Audit | ✅ |
 | 3.6 Evaluation & Quality Gates | ✅ |
 | 3.7 Deployment & Ops | ✅ |
-
-See `docs/PHASE3_PLAN.md`.
 
 ## Quick start (local)
 
@@ -40,10 +46,24 @@ docker compose up --build
 - API: http://localhost:8000/health · /ready · /metrics
 - UI:  http://localhost:8501
 
+## Phase 4.3 – how to use analytics paths
+
+In the **Chat & Analytics** tab (with a dataset loaded):
+
+| Intent | Example question |
+|--------|------------------|
+| EDA pack | `run eda` / click **Run EDA pack** |
+| Root-cause | `why did sales drop by region` |
+| What-if | `+10% amount on North` |
+| RFM | `show RFM segments` |
+
+Every answer shows a **grounding line** and optional **citations**. Follow-ups like `by region` or `only North` are expanded from chat history.
+
 ## Eval (Phase 3.6)
 
 ```bash
 pytest tests/test_eval_harness.py -q
+pytest tests/test_phase43_analytics.py -q
 python -m app.core.eval_harness --mode offline --fail-under 80
 ```
 
