@@ -14,15 +14,27 @@ Not full OAuth / multi-tenant IAM — deliberate MVP that is real and enforceabl
 
 from __future__ import annotations
 
+# Load .env early so INSIGHTFORGE_API_KEYS is visible when auth_enabled() runs
+try:
+    from pathlib import Path as _P
+    from dotenv import load_dotenv as _load_dotenv
+    _env = _P(__file__).resolve().parents[2] / ".env"
+    if _env.exists():
+        _load_dotenv(_env, override=False)
+    else:
+        _load_dotenv(override=False)
+except Exception:
+    pass
+
 import hashlib
 import json
 import os
-import secrets
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+import re
+import time
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class Role(str, Enum):
@@ -31,43 +43,44 @@ class Role(str, Enum):
     ADMIN = "admin"
 
 
-ROLE_RANK = {
-    Role.VIEWER: 1,
-    Role.ANALYST: 2,
-    Role.ADMIN: 3,
-}
-
-ROUTE_PERMISSIONS: Dict[str, Role] = {
-    "GET /health": Role.VIEWER,
-    "GET /datasets": Role.VIEWER,
-    "GET /datasets/{name}/schema": Role.VIEWER,
-    "POST /sql": Role.VIEWER,
-    "POST /ask": Role.ANALYST,
-    "POST /datasets/upload": Role.ANALYST,
-    "GET /audit": Role.ADMIN,
-}
+_ROLE_RANK = {Role.VIEWER: 1, Role.ANALYST: 2, Role.ADMIN: 3}
 
 
 @dataclass
 class Principal:
     key_id: str
     role: Role
-    label: str = ""
-    raw_key_hash: str = ""
 
-    def can(self, required: Role) -> bool:
-        return ROLE_RANK.get(self.role, 0) >= ROLE_RANK.get(required, 99)
+    def can(self, minimum: Role) -> bool:
+        return _ROLE_RANK.get(self.role, 0) >= _ROLE_RANK.get(minimum, 99)
 
 
-def _hash_key(key: str) -> str:
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+def _audit_dir() -> Path:
+    candidates = [
+        Path(__file__).resolve().parents[2] / "data" / "audit",
+        Path.cwd() / "data" / "audit",
+        Path("/tmp") / "insightforge_audit",
+    ]
+    for c in candidates:
+        try:
+            c.mkdir(parents=True, exist_ok=True)
+            return c
+        except Exception:
+            continue
+    return candidates[-1]
 
 
-def _parse_keys_from_env() -> Dict[str, Principal]:
-    raw = (os.getenv("INSIGHTFORGE_API_KEYS") or "").strip()
-    principals: Dict[str, Principal] = {}
+AUDIT_DIR = _audit_dir()
+
+
+def _parse_keys(raw: str) -> Dict[str, Tuple[str, Role]]:
+    """
+    Parse INSIGHTFORGE_API_KEYS=id:role:secret[,id:role:secret...]
+    Returns mapping secret -> (key_id, role)
+    """
+    out: Dict[str, Tuple[str, Role]] = {}
     if not raw:
-        return principals
+        return out
     for part in raw.split(","):
         part = part.strip()
         if not part:
@@ -80,119 +93,113 @@ def _parse_keys_from_env() -> Dict[str, Principal]:
             continue
         try:
             role = Role(role_s)
-        except ValueError:
+        except Exception:
             role = Role.VIEWER
-        h = _hash_key(secret)
-        principals[h] = Principal(key_id=key_id, role=role, label=key_id, raw_key_hash=h)
-    return principals
+        out[secret] = (key_id, role)
+    return out
 
 
-_KEY_STORE: Dict[str, Principal] = _parse_keys_from_env()
-
-
-def reload_keys() -> None:
-    global _KEY_STORE
-    _KEY_STORE = _parse_keys_from_env()
+def _keys() -> Dict[str, Tuple[str, Role]]:
+    raw = (os.getenv("INSIGHTFORGE_API_KEYS") or "").strip()
+    return _parse_keys(raw)
 
 
 def auth_enabled() -> bool:
-    return bool(_KEY_STORE)
+    return bool(_keys())
 
 
-def authenticate(api_key: Optional[str]) -> Optional[Principal]:
-    if not api_key:
-        return None
-    h = _hash_key(api_key.strip())
-    return _KEY_STORE.get(h)
-
-
-def require_role(principal: Optional[Principal], required: Role) -> bool:
+def authenticate(
+    x_api_key: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> Optional[Principal]:
+    """
+    Resolve principal from X-API-Key or Authorization: Bearer <secret>.
+    When auth is disabled, returns a synthetic admin principal.
+    """
     if not auth_enabled():
-        return True
+        return Principal(key_id="anonymous", role=Role.ADMIN)
+
+    secret = None
+    if x_api_key and x_api_key.strip():
+        secret = x_api_key.strip()
+    elif authorization and authorization.lower().startswith("bearer "):
+        secret = authorization[7:].strip()
+
+    if not secret:
+        return None
+
+    mapping = _keys()
+    if secret not in mapping:
+        return None
+    key_id, role = mapping[secret]
+    return Principal(key_id=key_id, role=role)
+
+
+def require_role(principal: Optional[Principal], minimum: Role) -> Principal:
     if principal is None:
-        return False
-    return principal.can(required)
+        raise PermissionError("UNAUTHORIZED: missing or invalid API key")
+    if not principal.can(minimum):
+        raise PermissionError(
+            f"FORBIDDEN: role `{principal.role.value}` cannot perform action requiring `{minimum.value}`"
+        )
+    return principal
 
 
-def _audit_root() -> Path:
-    candidates = [
-        Path.cwd() / "data" / "audit",
-        Path(__file__).resolve().parents[2] / "data" / "audit",
-        Path("/tmp") / "insightforge_audit",
-    ]
-    for c in candidates:
-        try:
-            c.mkdir(parents=True, exist_ok=True)
-            return c
-        except Exception:
-            continue
-    return candidates[-1]
-
-
-@dataclass
-class AuditEvent:
-    timestamp: str
-    action: str
-    principal_id: str = "anonymous"
-    role: str = "none"
-    table_name: Optional[str] = None
-    question: Optional[str] = None
-    sql: Optional[str] = None
-    success: Optional[bool] = None
-    intent: Optional[str] = None
-    result_rows: Optional[int] = None
-    error_code: Optional[str] = None
-    ip: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        return {k: v for k, v in d.items() if v is not None and v != {} and v != ""}
-
-
-def audit_log(event: AuditEvent) -> None:
+def audit_log(
+    action: str,
+    *,
+    principal: Optional[Principal] = None,
+    success: bool = True,
+    detail: Optional[Dict[str, Any]] = None,
+    client_ip: Optional[str] = None,
+) -> None:
+    """Append one JSON line to data/audit/YYYY-MM-DD.jsonl"""
     try:
-        root = _audit_root()
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = root / f"audit-{day}.jsonl"
+        day = time.strftime("%Y-%m-%d")
+        path = AUDIT_DIR / f"{day}.jsonl"
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "action": action,
+            "success": bool(success),
+            "key_id": getattr(principal, "key_id", None) if principal else None,
+            "role": getattr(getattr(principal, "role", None), "value", None) if principal else None,
+            "client_ip": client_ip,
+            "detail": detail or {},
+        }
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event.to_dict(), ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
     except Exception:
         pass
 
 
-def read_audit(limit: int = 100, day: Optional[str] = None) -> List[Dict[str, Any]]:
-    root = _audit_root()
-    if day:
-        paths = [root / f"audit-{day}.jsonl"]
-    else:
-        paths = sorted(root.glob("audit-*.jsonl"), reverse=True)
-    events: List[Dict[str, Any]] = []
-    for path in paths:
-        if not path.exists():
-            continue
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        events.append(json.loads(line))
-                    except Exception:
-                        continue
-        except Exception:
-            continue
-        if len(events) >= limit:
-            break
-    return events[-limit:]
+def read_audit(limit: int = 100) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        files = sorted(AUDIT_DIR.glob("*.jsonl"), reverse=True)
+        for fp in files:
+            try:
+                lines = fp.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            for line in reversed(lines):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+                if len(rows) >= limit:
+                    return rows
+    except Exception:
+        pass
+    return rows
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+# ---- Upload hardening ----
 
-
-ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".parquet"}
+MAX_UPLOAD_BYTES = int(os.getenv("INSIGHTFORGE_MAX_UPLOAD_MB", "25")) * 1024 * 1024
+ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".parquet"}
 ALLOWED_CONTENT_TYPES = {
     "text/csv",
     "application/vnd.ms-excel",
@@ -201,22 +208,34 @@ ALLOWED_CONTENT_TYPES = {
     "application/octet-stream",
     "text/plain",
 }
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
-def validate_upload(filename: str, content_type: Optional[str], size: int) -> Optional[str]:
-    if size <= 0:
-        return "EMPTY_FILE"
-    if size > MAX_UPLOAD_BYTES:
-        return "FILE_TOO_LARGE"
-    ext = Path(filename or "").suffix.lower()
-    if ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        return f"UNSUPPORTED_TYPE:{ext or 'unknown'}"
+def validate_upload(filename: str, size: int, content_type: Optional[str] = None) -> Optional[str]:
+    """Return error message or None if OK."""
+    if size is not None and size > MAX_UPLOAD_BYTES:
+        return f"File too large ({size} bytes). Max is {MAX_UPLOAD_BYTES} bytes."
+    name = (filename or "").lower()
+    ext = Path(name).suffix
+    if ext not in ALLOWED_EXTENSIONS:
+        return f"Extension `{ext}` not allowed. Use: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+    if content_type:
+        ct = content_type.split(";")[0].strip().lower()
+        if ct and ct not in ALLOWED_CONTENT_TYPES and not ct.startswith("text/"):
+            # Soft check – many browsers send octet-stream
+            pass
     return None
 
 
-def generate_api_key(prefix: str = "sk") -> str:
-    return f"{prefix}-{secrets.token_urlsafe(24)}"
+def redact_columns(columns: List[str], sensitive_hints: Optional[List[str]] = None) -> List[str]:
+    hints = sensitive_hints or ["password", "secret", "token", "ssn", "credit", "card", "cvv"]
+    out = []
+    for c in columns:
+        cl = c.lower()
+        if any(h in cl for h in hints):
+            out.append(f"{c} [REDACTED]")
+        else:
+            out.append(c)
+    return out
 
 
 __all__ = [
@@ -225,14 +244,10 @@ __all__ = [
     "auth_enabled",
     "authenticate",
     "require_role",
-    "reload_keys",
-    "AuditEvent",
     "audit_log",
     "read_audit",
-    "now_iso",
     "validate_upload",
+    "redact_columns",
     "MAX_UPLOAD_BYTES",
-    "ALLOWED_UPLOAD_EXTENSIONS",
-    "generate_api_key",
-    "ROUTE_PERMISSIONS",
+    "ALLOWED_EXTENSIONS",
 ]
