@@ -9,6 +9,7 @@ Responsibilities:
 - Return structured result with evidence (SQL, attempts, warnings)
 
 Phase 3: metric compiler preferred path + time intelligence + JOINs across tables.
+Phase 4.2: citation pack + grounding line on every successful answer.
 """
 
 from __future__ import annotations
@@ -29,22 +30,56 @@ if str(_ROOT) not in sys.path:
 import importlib.util
 
 
-def _load(name: str, path: Path):
+def _load(name: str, path: Path, required_attrs: tuple = ()) -> Any:
+    """
+    Safe dynamic loader used across agents/core.
+    - If module already in sys.modules and has required attrs → reuse
+    - If incomplete → discard and reload
+    - Prefer package import for llm_client when app is on path
+    - On exec failure remove partial module so next load can succeed
+    """
     if name in sys.modules:
-        return sys.modules[name]
+        mod = sys.modules[name]
+        if required_attrs and not all(hasattr(mod, a) for a in required_attrs):
+            del sys.modules[name]
+        else:
+            return mod
+
+    # Prefer proper package import for critical modules
+    if name == "llm_client":
+        try:
+            from app.core import llm_client as mod  # type: ignore
+            if hasattr(mod, "get_llm_client"):
+                sys.modules[name] = mod
+                return mod
+        except Exception:
+            pass
+
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load module {name} from {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
+    if required_attrs and not all(hasattr(mod, a) for a in required_attrs):
+        sys.modules.pop(name, None)
+        raise AttributeError(
+            f"Module '{name}' loaded but missing required attributes: {required_attrs}"
+        )
     return mod
 
 
-_llm = _load("llm_client", _CORE_DIR / "llm_client.py")
+# Critical: must expose get_llm_client or the whole pipeline fails at import time
+_llm = _load("llm_client", _CORE_DIR / "llm_client.py", required_attrs=("get_llm_client",))
 get_llm_client = _llm.get_llm_client
 
 try:
     _schema = _load("schema", _CORE_DIR / "schema.py")
-    detect_schema_semantic = _schema.detect_schema_semantic
+    detect_schema_semantic = getattr(_schema, "detect_schema_semantic", None)
 except Exception:
     detect_schema_semantic = None
 
@@ -61,6 +96,9 @@ class NL2SQLResult:
     provider: Optional[str] = None
     model: Optional[str] = None
     explanation: Optional[str] = None
+    # Phase 4.2 – citation / grounding
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    grounding_line: Optional[str] = None
 
 
 def _schema_context(workspace, table_name: str) -> str:
@@ -194,6 +232,50 @@ def _get_semantic_model(workspace, table_name: str):
         return None, None
 
 
+def _build_citations(
+    workspace,
+    table_name: str,
+    sql: Optional[str],
+    metric_name: Optional[str] = None,
+    metric_version: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Phase 4.2 – citation pack + grounding line shown in the UI."""
+    citations: List[Dict[str, Any]] = []
+    parts: List[str] = []
+
+    record = workspace.get(table_name) if workspace else None
+    cols: List[str] = []
+    if record is not None:
+        df = record.cleaned_df if getattr(record, "cleaned_df", None) is not None else getattr(record, "raw_df", None)
+        if df is not None:
+            cols = list(df.columns)
+
+    citations.append({
+        "type": "table",
+        "name": table_name,
+        "columns": cols[:40],
+        "source": getattr(record, "source_filename", None) if record else None,
+    })
+    parts.append(f"table `{table_name}`")
+
+    if metric_name:
+        citations.append({
+            "type": "metric",
+            "name": metric_name,
+            "version": metric_version or "auto",
+        })
+        ver = f" v{metric_version}" if metric_version else ""
+        parts.append(f"metric `{metric_name}{ver}`")
+
+    if sql:
+        quoted = re.findall(r'"([^"]+)"', sql)
+        if quoted:
+            citations.append({"type": "sql_columns", "names": list(dict.fromkeys(quoted))[:30]})
+
+    grounding = "Used: " + ", ".join(parts)
+    return citations, grounding
+
+
 def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2SQLResult:
     result = NL2SQLResult()
     if not question or not question.strip():
@@ -202,6 +284,8 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
     if table_name not in workspace.list_datasets():
         result.error = f"Table '{table_name}' not in workspace"
         return result
+
+    used_metric_name: Optional[str] = None
 
     # Phase 3.2 – metric compiler preferred path
     try:
@@ -224,9 +308,18 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
                             result.warnings.extend(_compiled.warnings)
                         if df is not None and len(df) == 0:
                             result.warnings.append("Query executed successfully but returned 0 rows.")
+                        used_metric_name = (
+                            getattr(_compiled, "metric_name", None)
+                            or getattr(_compiled, "matched_metric", None)
+                        )
+                        result.citations, result.grounding_line = _build_citations(
+                            workspace, table_name, _compiled.sql, metric_name=used_metric_name
+                        )
                         return result
                     else:
-                        result.warnings.append(f"Metric compiler SQL failed ({exec_error}); falling back to NL→SQL.")
+                        result.warnings.append(
+                            f"Metric compiler SQL failed ({exec_error}); falling back to NL→SQL."
+                        )
     except Exception as _e:
         result.warnings.append(f"Metric compiler skipped: {_e}")
 
@@ -250,9 +343,14 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
                         result.warnings.extend(_ti_res.warnings)
                     if df is not None and len(df) == 0:
                         result.warnings.append("Query executed successfully but returned 0 rows.")
+                    result.citations, result.grounding_line = _build_citations(
+                        workspace, table_name, _ti_res.sql
+                    )
                     return result
                 else:
-                    result.warnings.append(f"Time-intel SQL failed ({exec_error}); falling back to NL→SQL.")
+                    result.warnings.append(
+                        f"Time-intel SQL failed ({exec_error}); falling back to NL→SQL."
+                    )
     except Exception as _e:
         result.warnings.append(f"Time intelligence skipped: {_e}")
 
@@ -271,7 +369,6 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
         result.model = getattr(llm_resp, "model", None)
         if not getattr(llm_resp, "success", True) and getattr(llm_resp, "error", None):
             result.error = llm_resp.error
-            # Don't retry forever on missing API key
             if "API key" in str(llm_resp.error) or "No LLM" in str(llm_resp.error):
                 return result
         current_sql = sql
@@ -288,6 +385,9 @@ def ask(workspace, table_name: str, question: str, max_retries: int = 2) -> NL2S
             result.error = None
             if df is not None and len(df) == 0:
                 result.warnings.append("Query executed successfully but returned 0 rows.")
+            result.citations, result.grounding_line = _build_citations(
+                workspace, table_name, sql
+            )
             return result
         last_error = exec_error
         result.error = exec_error
