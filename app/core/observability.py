@@ -1,8 +1,8 @@
 """
-InsightForgeAI – Observability helpers (Phase 3.7)
+InsightForgeAI – Observability helpers (Phase 3.7 + 4.5)
 
 - Structured request logging (JSON lines to stdout)
-- In-process metrics counters (latency, status, provider hints)
+- In-process metrics counters (latency, status, provider hints, schedules)
 - Simple token-bucket rate limiter (per IP / API key)
 - Readiness checks (workspace, optional LLM keys)
 
@@ -43,6 +43,12 @@ class Metrics:
         self.errors_total = 0
         self.llm_calls = 0
         self.llm_errors = 0
+        # Phase 4.5 usage
+        self.queries_total = 0
+        self.schedule_runs = 0
+        self.schedule_failures = 0
+        self.llm_tokens_prompt = 0
+        self.llm_tokens_completion = 0
         self.started_at = now_iso()
 
     def record_request(self, path: str, status: int, latency_ms: float) -> None:
@@ -54,12 +60,24 @@ class Metrics:
             self.latency_ms.append(latency_ms)
             if status >= 500:
                 self.errors_total += 1
+            if bare in ("/ask", "/sql") or bare.endswith("/ask") or bare.endswith("/sql"):
+                self.queries_total += 1
 
-    def record_llm(self, success: bool) -> None:
+    def record_llm(self, success: bool, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
         with self._lock:
             self.llm_calls += 1
             if not success:
                 self.llm_errors += 1
+            if prompt_tokens:
+                self.llm_tokens_prompt += int(prompt_tokens)
+            if completion_tokens:
+                self.llm_tokens_completion += int(completion_tokens)
+
+    def record_schedule_run(self, success: bool) -> None:
+        with self._lock:
+            self.schedule_runs += 1
+            if not success:
+                self.schedule_failures += 1
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -79,6 +97,11 @@ class Metrics:
                 "latency_ms_p95": p95,
                 "llm_calls": self.llm_calls,
                 "llm_errors": self.llm_errors,
+                "llm_tokens_prompt": self.llm_tokens_prompt,
+                "llm_tokens_completion": self.llm_tokens_completion,
+                "queries_total": self.queries_total,
+                "schedule_runs": self.schedule_runs,
+                "schedule_failures": self.schedule_failures,
             }
 
 
@@ -131,6 +154,7 @@ def readiness_checks() -> Dict[str, Any]:
         "auth_enabled": bool((os.getenv("INSIGHTFORGE_API_KEYS") or "").strip()),
         "groq_key": bool((os.getenv("GROQ_API_KEY") or "").strip()),
         "gemini_key": bool((os.getenv("GOOGLE_API_KEY") or "").strip()),
+        "scheduler": True,
     }
     checks["ready"] = True
     checks["degraded"] = not (checks["groq_key"] or checks["gemini_key"])
