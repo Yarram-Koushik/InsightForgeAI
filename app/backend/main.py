@@ -1,8 +1,9 @@
 """
-InsightForgeAI – FastAPI Backend Boundary (Phase 3.4–3.7)
+InsightForgeAI – FastAPI Backend Boundary (Phase 3.4–3.7 + 4.5)
 
 Endpoints: / /health /ready /metrics /datasets /upload /ask /sql /audit
-Phase 3.5 auth + Phase 3.7 observability (logs, rate limit, metrics).
+           /workspaces /schedules /insights (Phase 4.5)
+Phase 3.5 auth + Phase 3.7 observability + Phase 4.5 scheduling.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ except Exception:
     pass
 
 import io
+import os
 import sys
 import time
 import traceback
@@ -93,6 +95,8 @@ try:
         AskRequest, AskResponse, DatasetInfo, DatasetsResponse,
         ErrorDetail, ErrorResponse, HealthResponse, SchemaResponse,
         SqlRequest, SqlResponse, UploadResponse,
+        ScheduleCreateRequest, ScheduleUpdateRequest, ScheduleResponse,
+        SchedulesListResponse, InsightCreateRequest, WorkspaceInfoResponse,
     )
 except ImportError:
     import importlib.util as _ilu
@@ -112,6 +116,12 @@ except ImportError:
     SqlRequest = _sch.SqlRequest
     SqlResponse = _sch.SqlResponse
     UploadResponse = _sch.UploadResponse
+    ScheduleCreateRequest = getattr(_sch, "ScheduleCreateRequest", None)
+    ScheduleUpdateRequest = getattr(_sch, "ScheduleUpdateRequest", None)
+    ScheduleResponse = getattr(_sch, "ScheduleResponse", None)
+    SchedulesListResponse = getattr(_sch, "SchedulesListResponse", None)
+    InsightCreateRequest = getattr(_sch, "InsightCreateRequest", None)
+    WorkspaceInfoResponse = getattr(_sch, "WorkspaceInfoResponse", None)
 
 try:
     from app.core.security import (
@@ -159,8 +169,8 @@ except ImportError:
 
 app = FastAPI(
     title="InsightForgeAI API",
-    description="Backend boundary for the multi-agent BI assistant (Phase 3.4–3.7)",
-    version="0.3.7",
+    description="Backend boundary for the multi-agent BI assistant (Phase 3.4–4.5)",
+    version="0.4.5",
 )
 
 app.add_middleware(
@@ -337,20 +347,45 @@ def _client_ip(request: Request) -> Optional[str]:
     return None
 
 
+def _schedule_to_response(s) -> ScheduleResponse:
+    return ScheduleResponse(
+        id=s.id,
+        name=s.name,
+        workspace_id=s.workspace_id,
+        kind=s.kind,
+        question=s.question or "",
+        table_name=s.table_name or "",
+        interval_minutes=s.interval_minutes,
+        daily_at=s.daily_at,
+        channel=s.channel,
+        enabled=s.enabled,
+        created_by=s.created_by,
+        created_at=s.created_at,
+        last_run_at=s.last_run_at,
+        next_run_at=s.next_run_at,
+        last_status=s.last_status,
+        last_error=s.last_error,
+        run_count=s.run_count,
+    )
+
+
 @app.get("/")
 def root():
     return {
         "service": "InsightForgeAI",
+        "version": "0.4.5",
         "docs": "/docs",
         "health": "/health",
         "ready": "/ready",
         "metrics": "/metrics",
+        "schedules": "/schedules",
+        "workspaces": "/workspaces",
     }
 
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    return HealthResponse(version="0.3.7")
+    return HealthResponse(version="0.4.5")
 
 
 @app.get("/ready")
@@ -554,6 +589,222 @@ def get_audit(
 ):
     events = read_audit(limit=min(limit, 1000), day=day)
     return {"count": len(events), "events": events}
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.5 – Workspaces, schedules, saved insights
+# ---------------------------------------------------------------------------
+
+@app.get("/workspaces")
+def list_workspaces_api(
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.VIEWER)),
+):
+    try:
+        from app.core.scheduling import list_workspace_infos
+        infos = list_workspace_infos()
+        return {"workspaces": infos, "count": len(infos)}
+    except Exception as e:
+        return {"workspaces": [], "count": 0, "error": str(e)}
+
+
+@app.get("/workspaces/{workspace_id}")
+def get_workspace_api(
+    workspace_id: str,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.VIEWER)),
+):
+    try:
+        from app.core.scheduling import workspace_info
+        return workspace_info(workspace_id)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/schedules", response_model=SchedulesListResponse)
+def list_schedules_api(
+    request: Request,
+    workspace_id: Optional[str] = None,
+    principal: Optional[Principal] = Depends(require_auth(Role.VIEWER)),
+):
+    from app.core.scheduling import load_schedules, list_all_schedules
+    if workspace_id:
+        items = load_schedules(workspace_id)
+    else:
+        items = list_all_schedules()
+    return SchedulesListResponse(
+        schedules=[_schedule_to_response(s) for s in items],
+        count=len(items),
+    )
+
+
+@app.post("/schedules", response_model=ScheduleResponse)
+def create_schedule_api(
+    req: ScheduleCreateRequest,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.ADMIN)),
+):
+    from app.core.scheduling import create_schedule
+    try:
+        created_by = principal.key_id if principal else "anonymous"
+        sched = create_schedule(
+            name=req.name,
+            workspace_id=req.workspace_id or "default",
+            kind=req.kind or "question",
+            question=req.question or "",
+            table_name=req.table_name or "",
+            interval_minutes=req.interval_minutes,
+            daily_at=req.daily_at,
+            channel=req.channel or "log",
+            webhook_url=req.webhook_url,
+            email_to=req.email_to,
+            created_by=created_by,
+            enabled=bool(req.enabled),
+        )
+        audit_log(AuditEvent(
+            timestamp=now_iso(), action="schedule_create",
+            principal_id=created_by,
+            role=(principal.role.value if principal else "none"),
+            table_name=req.table_name or None,
+            question=(req.question or req.name)[:500],
+            success=True,
+            ip=_client_ip(request),
+            extra={"schedule_id": sched.id, "channel": sched.channel, "kind": sched.kind},
+        ))
+        return _schedule_to_response(sched)
+    except ValueError as e:
+        return _error("INVALID_SCHEDULE", str(e), 400)
+    except Exception as e:
+        return _error("SCHEDULE_CREATE_FAILED", str(e), 500)
+
+
+@app.patch("/schedules/{workspace_id}/{schedule_id}", response_model=ScheduleResponse)
+def update_schedule_api(
+    workspace_id: str,
+    schedule_id: str,
+    req: ScheduleUpdateRequest,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.ADMIN)),
+):
+    from app.core.scheduling import update_schedule
+    patches = {k: v for k, v in req.model_dump(exclude_unset=True).items() if v is not None}
+    updated = update_schedule(workspace_id, schedule_id, **patches)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    audit_log(AuditEvent(
+        timestamp=now_iso(), action="schedule_update",
+        principal_id=(principal.key_id if principal else "anonymous"),
+        role=(principal.role.value if principal else "none"),
+        success=True, ip=_client_ip(request),
+        extra={"schedule_id": schedule_id, "patches": list(patches.keys())},
+    ))
+    return _schedule_to_response(updated)
+
+
+@app.delete("/schedules/{workspace_id}/{schedule_id}")
+def delete_schedule_api(
+    workspace_id: str,
+    schedule_id: str,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.ADMIN)),
+):
+    from app.core.scheduling import delete_schedule
+    ok = delete_schedule(workspace_id, schedule_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    audit_log(AuditEvent(
+        timestamp=now_iso(), action="schedule_delete",
+        principal_id=(principal.key_id if principal else "anonymous"),
+        role=(principal.role.value if principal else "none"),
+        success=True, ip=_client_ip(request),
+        extra={"schedule_id": schedule_id, "workspace_id": workspace_id},
+    ))
+    return {"success": True, "deleted": schedule_id}
+
+
+@app.post("/schedules/{workspace_id}/{schedule_id}/run")
+def run_schedule_now_api(
+    workspace_id: str,
+    schedule_id: str,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.ADMIN)),
+):
+    from app.core.scheduling import get_schedule, run_schedule
+    sched = get_schedule(workspace_id, schedule_id)
+    if sched is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    ws = get_workspace()
+    try:
+        orch = _load_orchestrator()
+        run_fn = orch.run_agent
+    except Exception:
+        run_fn = None
+    result = run_schedule(sched, workspace=ws, orchestrator_run=run_fn)
+    return result
+
+
+@app.get("/insights")
+def list_insights_api(
+    request: Request,
+    workspace_id: str = "default",
+    principal: Optional[Principal] = Depends(require_auth(Role.VIEWER)),
+):
+    from app.core.scheduling import load_insights
+    items = load_insights(workspace_id)
+    return {"insights": [i.to_dict() for i in items], "count": len(items)}
+
+
+@app.post("/insights")
+def create_insight_api(
+    req: InsightCreateRequest,
+    request: Request,
+    principal: Optional[Principal] = Depends(require_auth(Role.ANALYST)),
+):
+    from app.core.scheduling import SavedInsight, add_insight
+    import uuid as _uuid
+    insight = SavedInsight(
+        id=str(_uuid.uuid4())[:8],
+        name=req.name,
+        question=req.question,
+        table_name=req.table_name,
+        workspace_id=req.workspace_id or "default",
+        description=req.description or "",
+        created_by=(principal.key_id if principal else "anonymous"),
+        tags=list(req.tags or []),
+    )
+    add_insight(insight)
+    audit_log(AuditEvent(
+        timestamp=now_iso(), action="insight_save",
+        principal_id=insight.created_by,
+        role=(principal.role.value if principal else "none"),
+        table_name=req.table_name,
+        question=req.question[:500],
+        success=True, ip=_client_ip(request),
+        extra={"insight_id": insight.id},
+    ))
+    return insight.to_dict()
+
+
+@app.on_event("startup")
+def _startup_scheduler():
+    """Optional in-process due-schedule poller (least privilege, daemon)."""
+    if (os.getenv("INSIGHTFORGE_SCHEDULER") or "1").strip() in ("0", "false", "False"):
+        log_event("scheduler_disabled")
+        return
+    try:
+        from app.core.scheduling import start_background_scheduler
+
+        def _ws_factory(workspace_id: str):
+            # Shared process workspace – durable restore can be added later
+            return get_workspace()
+
+        started = start_background_scheduler(
+            interval_sec=int(os.getenv("SCHEDULER_POLL_SEC", "60")),
+            workspace_factory=_ws_factory,
+        )
+        log_event("scheduler_started", started=started)
+    except Exception as e:
+        log_event("scheduler_start_failed", error=str(e)[:300])
 
 
 def create_app() -> FastAPI:
