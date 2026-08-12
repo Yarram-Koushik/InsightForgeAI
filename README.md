@@ -4,7 +4,7 @@ AI-Powered Business Intelligence Assistant — *ChatGPT for company data*
 
 ## Status
 
-Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.4 ✅**
+Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.5 ✅**
 
 ## Phase 4 (Industry depth)
 
@@ -14,6 +14,7 @@ Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.4 ✅**
 | 4.2 Conversational memory & citations (follow-up expand, grounding line) | ✅ |
 | 4.3 Automated analytics depth (EDA pack, root-cause, what-if, RFM) | ✅ |
 | 4.4 Dashboards & Export (pin widgets, refresh, PDF + PPTX) | ✅ |
+| 4.5 Enterprise multi-user & scheduling (workspaces, schedules, Slack/email, audit) | ✅ |
 
 ## Phase 3 (Option B – Industry)
 
@@ -37,15 +38,44 @@ uvicorn app.backend.main:app --reload --port 8000
 streamlit run app/frontend/app.py
 ```
 
-## Docker (Phase 3.7)
+## Docker (Phase 3.7+)
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-- API: http://localhost:8000/health · /ready · /metrics
+- API: http://localhost:8000/health · /ready · /metrics · /schedules
 - UI:  http://localhost:8501
+
+## Phase 4.5 – Scheduling & multi-user
+
+Admin (role `admin`) can create schedules:
+
+```bash
+curl -X POST http://localhost:8000/schedules \
+  -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "name": "Daily revenue by region",
+    "workspace_id": "default",
+    "kind": "question",
+    "question": "total revenue by region",
+    "table_name": "phase3_test_orders",
+    "daily_at": "08:00",
+    "channel": "log"
+  }'
+```
+
+- Channels: `log` | `slack` | `email`
+- Run now: `POST /schedules/{workspace_id}/{id}/run`
+- Audit: `GET /audit` (shows `schedule_create` / `schedule_run`)
+- Metrics: `GET /metrics` → `schedule_runs`, `queries_total`
+
+See [docs/PHASE4_5_ENTERPRISE.md](docs/PHASE4_5_ENTERPRISE.md).
+
+```bash
+pytest tests/test_scheduling.py -q
+```
 
 ## Phase 4.3 – how to use analytics paths
 
