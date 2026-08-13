@@ -1,4 +1,4 @@
-"""InsightForgeAI Streamlit UI – Phase 4.5 (Enterprise multi-user & scheduling)."""
+"""InsightForgeAI Streamlit UI – Phase 4.6 (Knowledge + Proactive)."""
 from __future__ import annotations
 
 import os
@@ -68,12 +68,6 @@ detect_cleaning_issues = _cleaning.detect_cleaning_issues
 apply_safe_cleaning = getattr(_cleaning, "apply_safe_cleaning", None)
 run_agent = _orch.run_agent
 
-_dash_mod = None
-try:
-    _dash_mod = _load("app.core.dashboard", PROJECT_ROOT / "app/core/dashboard.py", "app.core")
-except Exception:
-    pass
-
 _sched_mod = _sec_mod = _obs_mod = _admin_panel = None
 try:
     _sched_mod = _load("app.core.scheduling", PROJECT_ROOT / "app/core/scheduling.py", "app.core")
@@ -96,6 +90,18 @@ except Exception:
         _admin_panel = _load("admin_panel", PROJECT_ROOT / "app/frontend/admin_panel.py")
     except Exception:
         pass
+
+_kb_mod = None
+try:
+    _kb_mod = _load("app.core.knowledge_base", PROJECT_ROOT / "app/core/knowledge_base.py", "app.core")
+except Exception:
+    pass
+
+_proactive_mod = None
+try:
+    _proactive_mod = _load("app.core.proactive", PROJECT_ROOT / "app/core/proactive.py", "app.core")
+except Exception:
+    pass
 
 st.set_page_config(page_title="InsightForgeAI", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 
@@ -125,8 +131,18 @@ def _get_durable_store():
         return None
 
 
+def _get_kb_store():
+    if _kb_mod is None:
+        return None
+    wid = st.session_state.get("active_workspace_id") or os.getenv("INSIGHTFORGE_WORKSPACE_ID", "default")
+    try:
+        return _kb_mod.get_knowledge_store(wid)
+    except Exception:
+        return None
+
+
 st.sidebar.title("InsightForgeAI")
-st.sidebar.caption("Phase 4.5 · Enterprise · Scheduling")
+st.sidebar.caption("Phase 4.6 · Knowledge · Proactive")
 
 try:
     from app.core.workspace_store import list_workspaces as _list_ws
@@ -200,17 +216,79 @@ else:
     selected_table = None
     st.sidebar.info("Upload a file to begin.")
 
-st.title("InsightForgeAI")
-st.caption("ChatGPT for company data · Phase 4.5 enterprise scheduling")
+# Phase 4.6 Knowledge upload
+st.sidebar.markdown("### Knowledge docs")
+kb_files = st.sidebar.file_uploader(
+    "SOPs / policies (PDF, MD, TXT)",
+    type=["pdf", "md", "markdown", "txt"],
+    accept_multiple_files=True,
+    key="kb_upload",
+)
+kb_store = _get_kb_store()
+if kb_files and kb_store is not None:
+    for kf in kb_files:
+        try:
+            data = kf.read()
+            res = kb_store.ingest_file_bytes(data, kf.name)
+            if res.success:
+                st.sidebar.success(f"KB: `{res.source}` → {res.n_chunks} chunks")
+            else:
+                st.sidebar.error(f"KB failed {kf.name}: {res.error}")
+            for w in res.warnings or []:
+                st.sidebar.caption(w)
+        except Exception as e:
+            st.sidebar.error(f"KB error {kf.name}: {e}")
 
-if not available_tables:
-    st.info("Upload files from the sidebar to get started.")
+if kb_store is not None:
+    try:
+        docs = kb_store.list_documents()
+        if docs:
+            st.sidebar.caption(f"{len(docs)} document(s) in knowledge base")
+            for d in docs[:6]:
+                st.sidebar.code(f"{d.get('source')} ({d.get('n_chunks')} chunks)", language=None)
+    except Exception:
+        pass
+
+st.title("InsightForgeAI")
+st.caption("ChatGPT for company data · Phase 4.6 knowledge + proactive")
+
+if selected_table and _proactive_mod is not None:
+    with st.expander("⚡ Proactive insights (vs 7-period baseline)", expanded=False):
+        if st.button("Scan now", key="proactive_scan_btn"):
+            cards = _proactive_mod.scan_workspace_table(
+                st.session_state.workspace, selected_table, window=7
+            )
+            st.session_state["_last_proactive"] = [c.to_dict() for c in cards]
+        last = st.session_state.get("_last_proactive") or []
+        if last:
+            for c in last:
+                sev = c.get("severity", "info")
+                badge = {"alert": "🔴", "watch": "🟡", "info": "🔵"}.get(sev, "•")
+                st.markdown(f"{badge} **{c.get('title')}** — {c.get('summary')}")
+                if c.get("suggested_question"):
+                    st.caption(f"Try: {c['suggested_question']}")
+        else:
+            st.caption("Click **Scan now** to check for unusual patterns.")
+
+has_kb = False
+if kb_store is not None:
+    try:
+        has_kb = bool(kb_store.list_documents())
+    except Exception:
+        has_kb = False
+
+if not available_tables and not has_kb:
+    st.info("Upload data files and/or knowledge documents from the sidebar to get started.")
     st.stop()
 
 tab_chat, tab_admin = st.tabs(["💬 Chat & Analytics", "🔐 Admin"])
 
 with tab_chat:
-    st.markdown(f"**Active dataset:** `{selected_table}`")
+    if selected_table:
+        st.markdown(f"**Active dataset:** `{selected_table}`")
+    else:
+        st.markdown("**Active dataset:** _(none – knowledge-only mode)_")
+
     for i, turn in enumerate(st.session_state.chat_history):
         with st.container(border=True):
             st.markdown(f"**You:** {turn.get('question') or ''}")
@@ -218,11 +296,29 @@ with tab_chat:
                 st.markdown(turn["message"])
             if turn.get("insight") and turn.get("insight") != turn.get("message"):
                 st.markdown(turn["insight"])
+            if turn.get("grounding_line"):
+                st.caption(f"🔗 {turn['grounding_line']}")
             if turn.get("sql"):
                 with st.expander("SQL"):
                     st.code(turn["sql"], language="sql")
             if turn.get("result_df") is not None:
                 st.dataframe(turn["result_df"], use_container_width=True, hide_index=True)
+            cites = turn.get("citations") or []
+            if cites:
+                with st.expander(f"Citations ({len(cites)})"):
+                    for c in cites:
+                        if c.get("type") == "document":
+                            st.markdown(
+                                f"- **{c.get('source')}** · chunk `{c.get('chunk_id')}` "
+                                f"(score {c.get('score')})\n\n  > {(c.get('excerpt') or '')[:200]}"
+                            )
+                        else:
+                            st.json(c)
+            if turn.get("proactive_cards"):
+                for c in turn["proactive_cards"]:
+                    sev = c.get("severity", "info")
+                    badge = {"alert": "🔴", "watch": "🟡", "info": "🔵"}.get(sev, "•")
+                    st.info(f"{badge} {c.get('title')}: {c.get('summary')}")
             if turn.get("error") and not turn.get("success"):
                 st.error(turn["error"])
 
@@ -230,7 +326,7 @@ with tab_chat:
     with col_in:
         nl_question = st.text_input(
             "Your question",
-            placeholder="e.g. total revenue by region",
+            placeholder="e.g. total revenue by region · what's our refund policy · anything unusual?",
             key="nl_q",
             label_visibility="collapsed",
         )
@@ -243,12 +339,13 @@ with tab_chat:
 
     if ask_clicked and (nl_question or "").strip():
         raw_q = nl_question.strip()
-        with st.spinner("Running analytics pipeline…"):
+        with st.spinner("Running analytics / knowledge pipeline…"):
             try:
                 result = run_agent(
                     question=raw_q,
-                    table_name=selected_table,
+                    table_name=selected_table or "",
                     workspace=st.session_state.workspace,
+                    workspace_id=st.session_state.get("active_workspace_id"),
                 )
             except Exception as e:
 
@@ -257,6 +354,9 @@ with tab_chat:
                     message = error = str(e)
                     intent = "error"
                     insight = sql = result_df = None
+                    grounding_line = None
+                    citations = []
+                    proactive_cards = []
 
                 result = _E()
         turn = {
@@ -268,6 +368,10 @@ with tab_chat:
             "insight": getattr(result, "insight", None),
             "result_df": getattr(result, "result_df", None),
             "error": getattr(result, "error", None),
+            "grounding_line": getattr(result, "grounding_line", None),
+            "citations": list(getattr(result, "citations", None) or []),
+            "proactive_cards": list(getattr(result, "proactive_cards", None) or []),
+            "intent": getattr(result, "intent", None),
         }
         st.session_state.chat_history.append(turn)
         st.rerun()
