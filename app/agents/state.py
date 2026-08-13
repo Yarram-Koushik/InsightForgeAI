@@ -4,6 +4,7 @@ All dataclasses are plain so they work under importlib loading.
 
 Phase 4.2: citations + grounding_line for trust / multi-turn evidence.
 Phase 4.3: eda_pack, extra_charts, root_cause, whatif, rfm artifacts.
+Phase 4.6: knowledge hits + proactive cards.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ class Intent(str, Enum):
     META = "meta"                   # about the system itself
     UNSUPPORTED = "unsupported"     # cannot be answered from current data
     FORECAST = "forecast"           # time-series forecast / trend / anomaly
+    KNOWLEDGE = "knowledge"         # policy / SOP / document RAG (Phase 4.6)
+    PROACTIVE = "proactive"         # scan for unusual patterns (Phase 4.6)
 
 
 @dataclass
@@ -73,11 +76,16 @@ class AgentState:
     grounding_line: Optional[str] = None
 
     # Phase 4.3 – specialized analytics artifacts
-    extra_charts: List[Dict[str, Any]] = field(default_factory=list)  # [{title, fig, reason}, ...]
+    extra_charts: List[Dict[str, Any]] = field(default_factory=list)
     eda_pack: Any = None
     root_cause: Any = None
     whatif: Any = None
     rfm: Any = None
+
+    # Phase 4.6 – knowledge + proactive
+    knowledge_hits: List[Dict[str, Any]] = field(default_factory=list)
+    proactive_cards: List[Dict[str, Any]] = field(default_factory=list)
+    workspace_id: Optional[str] = None
 
     # Pipeline bookkeeping
     steps: List[str] = field(default_factory=list)
@@ -111,13 +119,17 @@ class AgentResult:
     trend_summary: Optional[str] = None
     anomalies: List[Any] = field(default_factory=list)
 
-    # Phase 4.2 – citations & grounding (shown in UI on every answer)
+    # Phase 4.2 – citations & grounding
     citations: List[Dict[str, Any]] = field(default_factory=list)
     grounding_line: Optional[str] = None
 
     # Phase 4.3 – analytics extras
     extra_charts: List[Dict[str, Any]] = field(default_factory=list)
     eda_pack: Any = None
+
+    # Phase 4.6
+    knowledge_hits: List[Dict[str, Any]] = field(default_factory=list)
+    proactive_cards: List[Dict[str, Any]] = field(default_factory=list)
 
     # Meta
     steps: List[str] = field(default_factory=list)
@@ -140,4 +152,6 @@ class AgentResult:
             "grounding_line": self.grounding_line,
             "citations": self.citations,
             "extra_chart_titles": [c.get("title") for c in (self.extra_charts or [])],
+            "knowledge_hits": len(self.knowledge_hits or []),
+            "proactive_cards": len(self.proactive_cards or []),
         }
