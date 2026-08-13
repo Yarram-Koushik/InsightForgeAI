@@ -4,7 +4,7 @@ AI-Powered Business Intelligence Assistant — *ChatGPT for company data*
 
 ## Status
 
-Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.5 ✅**
+Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.6 ✅**
 
 ## Phase 4 (Industry depth)
 
@@ -15,6 +15,7 @@ Phase 1 ✅ · Phase 2 ✅ · Phase 3.1–3.7 ✅ · **Phase 4.1–4.5 ✅**
 | 4.3 Automated analytics depth (EDA pack, root-cause, what-if, RFM) | ✅ |
 | 4.4 Dashboards & Export (pin widgets, refresh, PDF + PPTX) | ✅ |
 | 4.5 Enterprise multi-user & scheduling (workspaces, schedules, Slack/email, audit) | ✅ |
+| 4.6 Knowledge base, RAG & proactive insights | ✅ |
 
 ## Phase 3 (Option B – Industry)
 
@@ -47,6 +48,18 @@ docker compose up --build
 
 - API: http://localhost:8000/health · /ready · /metrics · /schedules
 - UI:  http://localhost:8501
+
+## Phase 4.6 – Knowledge & Proactive
+
+1. Sidebar → **Knowledge docs** → upload PDF / Markdown / TXT (SOPs, policies).
+2. Ask *What's our refund policy?* → grounded answer with **chunk citations**.
+3. Ask *Anything unusual in orders?* or click **Scan now** under Proactive insights → severity cards vs 7-period baseline.
+
+```bash
+pytest tests/test_knowledge_base.py tests/test_proactive.py -q
+```
+
+See [docs/PHASE4_6_KNOWLEDGE.md](docs/PHASE4_6_KNOWLEDGE.md).
 
 ## Phase 4.5 – Scheduling & multi-user
 
