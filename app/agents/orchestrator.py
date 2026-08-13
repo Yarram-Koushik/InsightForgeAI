@@ -2,9 +2,11 @@
 
 Phase 4.2: citations + grounding_line
 Phase 4.3: analytics_agent paths (EDA, root-cause, what-if, RFM)
+Phase 4.6: knowledge (RAG) + proactive scan paths
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -63,6 +65,21 @@ try:
 except Exception:
     _ctx = None
 
+try:
+    _kb = _load("knowledge_base", _AGENTS_DIR.parent / "core" / "knowledge_base.py")
+except Exception:
+    _kb = None
+
+try:
+    _proactive = _load("proactive", _AGENTS_DIR.parent / "core" / "proactive.py")
+except Exception:
+    _proactive = None
+
+try:
+    _llm_mod = _load("llm_client", _AGENTS_DIR.parent / "core" / "llm_client.py")
+except Exception:
+    _llm_mod = None
+
 
 def _intent_str(intent) -> str:
     if intent is None:
@@ -98,8 +115,9 @@ def _from_state(state: AgentState, success: bool, message: Optional[str] = None)
         provider=getattr(state, "provider", None),
         model=getattr(state, "model", None),
         message=message or insight or (clarify[0] if clarify else None) or ("Done." if success else "Failed."),
+        knowledge_hits=list(getattr(state, "knowledge_hits", None) or []),
+        proactive_cards=list(getattr(state, "proactive_cards", None) or []),
     )
-    # Phase 4.3 optional extras (UI may read via getattr)
     result.extra_charts = list(getattr(state, "extra_charts", None) or [])
     result.eda_pack = getattr(state, "eda_pack", None)
     return result
@@ -115,7 +133,8 @@ def _meta_response(state: AgentState) -> AgentResult:
     msg = (
         "I am InsightForgeAI — an AI BI assistant for your company data. "
         "I can run SQL analytics, EDA, root-cause breakdowns, what-if scenarios, "
-        "forecasts, and RFM when the right columns exist."
+        "forecasts, RFM, answer policy questions from the knowledge base, "
+        "and surface proactive unusual-pattern cards."
     )
     if tables:
         msg += f" Loaded tables: {', '.join(tables)}."
@@ -136,11 +155,78 @@ def _unsupported_response(state: AgentState) -> AgentResult:
         intent=_intent_str(Intent.UNSUPPORTED),
         intent_reason=state.intent_reason or "unsupported",
         message=(
-            "I cannot answer that from the current dataset. "
-            "Try a question about the loaded columns, or upload more data."
+            "I cannot answer that from the current dataset or knowledge base. "
+            "Try a question about the loaded columns, upload a policy document, "
+            "or ask for a proactive scan."
         ),
         steps=list(state.steps or []),
     )
+
+
+def _workspace_id_from_state(state: AgentState) -> str:
+    wid = getattr(state, "workspace_id", None)
+    if wid:
+        return str(wid)
+    return os.getenv("INSIGHTFORGE_WORKSPACE_ID", "default")
+
+
+def _run_knowledge(state: AgentState) -> AgentResult:
+    state.steps.append("knowledge:start")
+    if _kb is None:
+        state.error = "Knowledge base module not available."
+        state.steps.append("knowledge:missing")
+        return _from_state(state, False, state.error)
+
+    store = _kb.get_knowledge_store(_workspace_id_from_state(state))
+    llm = None
+    if _llm_mod is not None and hasattr(_llm_mod, "get_llm_client"):
+        try:
+            llm = _llm_mod.get_llm_client()
+        except Exception:
+            llm = None
+
+    out = store.answer(state.question or "", top_k=5, llm_client=llm)
+    state.citations = list(out.get("citations") or [])
+    state.knowledge_hits = list(out.get("citations") or [])
+    state.grounding_line = out.get("grounding_line")
+    state.insight_text = out.get("answer")
+    state.provider = out.get("provider") or state.provider
+    state.model = out.get("model") or state.model
+    success = bool(out.get("success"))
+    if not success:
+        state.error = out.get("answer")
+    state.steps.append(f"knowledge:done:hits={out.get('hits', 0)}")
+    return _from_state(state, success, out.get("answer"))
+
+
+def _run_proactive(state: AgentState) -> AgentResult:
+    state.steps.append("proactive:start")
+    if _proactive is None:
+        state.error = "Proactive module not available."
+        state.steps.append("proactive:missing")
+        return _from_state(state, False, state.error)
+
+    cards = []
+    if state.workspace and state.table_name:
+        cards = _proactive.scan_workspace_table(state.workspace, state.table_name, window=7)
+    card_dicts = [c.to_dict() if hasattr(c, "to_dict") else c for c in (cards or [])]
+    state.proactive_cards = card_dicts
+    msg = _proactive.cards_to_message(cards)
+    state.insight_text = msg
+    state.grounding_line = (
+        f"Used: proactive scan on `{state.table_name}` (7-period baseline)"
+        if state.table_name
+        else "Used: proactive scan (no table)"
+    )
+    state.citations = [{
+        "type": "proactive",
+        "table": state.table_name,
+        "card_count": len(card_dicts),
+        "severities": [c.get("severity") for c in card_dicts],
+    }]
+    state.sql_success = True
+    state.steps.append(f"proactive:done:cards={len(card_dicts)}")
+    return _from_state(state, True, msg)
 
 
 def run_agent(
@@ -158,6 +244,7 @@ def run_agent(
         question=(question or "").strip(),
         table_name=table_name or "",
         workspace=workspace,
+        workspace_id=kwargs.get("workspace_id") or os.getenv("INSIGHTFORGE_WORKSPACE_ID", "default"),
     )
     state.steps = ["orchestrator:start"]
 
@@ -168,7 +255,6 @@ def run_agent(
             except Exception:
                 pass
 
-        # Phase 4.3 – specialized analytics paths take priority over generic SQL
         analytics_path = None
         if _analytics is not None and hasattr(_analytics, "detect_analytics_path"):
             try:
@@ -207,6 +293,11 @@ def run_agent(
             if state.clarify_questions:
                 msg = "I need a bit more detail:\n- " + "\n- ".join(state.clarify_questions[:5])
             return _from_state(state, True, msg)
+
+        if state.intent == Intent.KNOWLEDGE:
+            return _run_knowledge(state)
+        if state.intent == Intent.PROACTIVE:
+            return _run_proactive(state)
 
         if state.intent in (Intent.DATA_QUERY, Intent.INSIGHT, Intent.FORECAST):
             state.steps.append("sql_agent:start")
