@@ -2,6 +2,8 @@
 Router Agent – classifies user intent before any heavy work.
 Uses the shared LLM client. Falls back to DATA_QUERY on any failure
 so the system never blocks the user.
+
+Phase 4.6: knowledge (policy/SOP) + proactive scan intents.
 """
 
 from __future__ import annotations
@@ -43,12 +45,14 @@ Classify the user question into exactly one intent:
 - data_query : User wants numbers, counts, lists, filters, rankings, aggregations from the table.
 - insight    : User wants explanation, comparison meaning, "why", "what does this mean", summary insights (not a numeric forecast).
 - forecast   : User wants a future forecast, projection, trend over time, or anomaly detection on a time series.
+- knowledge  : User asks about company policy, SOP, process, refund rules, or content that lives in uploaded documents (not table numbers).
+- proactive  : User asks "anything unusual", "what should I watch", "proactive insights", or a scan for anomalies vs recent baseline.
 - clarify    : Question is too vague, missing key filters, or could mean multiple things. Needs clarification.
 - meta       : Question is about the system itself (capabilities, how it works, what data is loaded).
-- unsupported: Clearly cannot be answered from tabular company data (e.g. weather, news, general knowledge, coding help).
+- unsupported: Clearly cannot be answered from tabular company data or the knowledge base (e.g. weather, news, general knowledge, coding help).
 
 Reply with ONLY this format (no markdown):
-INTENT: <one of the six>
+INTENT: <one of the eight>
 REASON: <one short sentence>
 """
 
@@ -61,9 +65,27 @@ def _heuristic_intent(question: str) -> Tuple[str, str]:
     if any(k in q for k in meta_kw) and len(q) < 80:
         return "meta", "Question appears to be about the system."
 
+    proactive_kw = [
+        "anything unusual", "what is unusual", "what's unusual", "proactive",
+        "what should i watch", "any anomalies", "scan for anomalies",
+        "unusual patterns", "anything odd", "red flags",
+    ]
+    if any(k in q for k in proactive_kw):
+        return "proactive", "User requested a proactive / unusual-pattern scan."
+
+    knowledge_kw = [
+        "policy", "policies", "sop", "standard operating", "refund policy",
+        "return policy", "our process", "procedure", "handbook", "guidelines",
+        "what is our", "what's our", "company rule", "how do we handle",
+        "knowledge base", "from the document", "according to the doc",
+    ]
+    if any(k in q for k in knowledge_kw):
+        return "knowledge", "Question looks like a policy / process / document question."
+
     clarify_kw = ["something", "stuff", "anything", "performance", "analyse this", "analyze this", "tell me about"]
     if q in ("?", "data", "report", "analysis") or (any(k in q for k in clarify_kw) and len(q.split()) <= 4):
-        return "clarify", "Question is too vague to answer precisely."
+        if "unusual" not in q and "anomaly" not in q:
+            return "clarify", "Question is too vague to answer precisely."
 
     forecast_kw = ["forecast", "predict", "projection", "next week", "next month", "next 30", "future", "anomaly", "anomalies", "time series", "over time"]
     if any(k in q for k in forecast_kw):
@@ -138,6 +160,12 @@ def classify(state: AgentState) -> AgentState:
         "insights": Intent.INSIGHT,
         "forecast": Intent.FORECAST,
         "prediction": Intent.FORECAST,
+        "knowledge": Intent.KNOWLEDGE,
+        "policy": Intent.KNOWLEDGE,
+        "document": Intent.KNOWLEDGE,
+        "rag": Intent.KNOWLEDGE,
+        "proactive": Intent.PROACTIVE,
+        "scan": Intent.PROACTIVE,
         "clarify": Intent.CLARIFY,
         "clarification": Intent.CLARIFY,
         "meta": Intent.META,
