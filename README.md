@@ -133,3 +133,6 @@ INSIGHTFORGE_API_KEYS=admin1:admin:sk-change-me
 Send `X-API-Key: sk-change-me`. Roles: viewer · analyst · admin.
 
 > **Note:** This project is actively developed as a practical AI-powered business intelligence application.
+## Documentation
+
+For setup instructions, project architecture, usage details, testing, and development information, refer to the documentation provided in this repository.
